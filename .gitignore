@@ -1,0 +1,8 @@
+# Ignore output files
+*.txt
+*.log
+CopiedJira.txt
+
+# Ignore OS generated files
+.DS_Store
+Thumbs.db
