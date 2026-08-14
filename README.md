@@ -34,11 +34,28 @@ Android Studio and Gradle love to hoard old wrapper distributions.
     .\Clean-GradleCache.ps1 -Force
     ```
 
+### 3. Clean-VSCodeCache.ps1 (The IntelliSense Purger)
+VS Code C/C++ Extension (`ms-vscode.cpptools`) hoards gigabytes of IPCH header caches and workspace browsing databases.
+
+* **Logic:** Scans `%LOCALAPPDATA%\Microsoft\vscode-cpptools` for IPCH and Browse DB directories older than 30 days (configurable).
+* **Safety:** Runs in **Dry Run** mode by default. Warns if VS Code processes are actively locking files.
+* **Usage:**
+    ```powershell
+    # Preview deletion (default 30 days retention)
+    .\Clean-VSCodeCache.ps1
+
+    # Execute deletion
+    .\Clean-VSCodeCache.ps1 -Force
+
+    # Purge all caches regardless of age
+    .\Clean-VSCodeCache.ps1 -DaysRetention 0 -Force
+    ```
+
 ## ⚠️ Disclaimer
 
 These scripts are provided "as is". 
 * **CopyJira** does not crack encryption; it automates legitimate UI interactions to save physical effort.
-* **Clean-GradleCache** deletes files. Double-check the output before forcing deletion.
+* **Clean-GradleCache** & **Clean-VSCodeCache** delete files. Double-check the output before forcing deletion.
 
 ## 👤 Author
 
