@@ -51,11 +51,34 @@ VS Code C/C++ Extension (`ms-vscode.cpptools`) hoards gigabytes of IPCH header c
     .\Clean-VSCodeCache.ps1 -DaysRetention 0 -Force
     ```
 
+### 4. Clean-JetBrainsCache.ps1 (The Index Purger)
+JetBrains IDEs (IntelliJ IDEA, CLion, PyCharm, Rider, WebStorm, etc.) and Google Android Studio accumulate massive symbol indexes, compiler caches, and log files.
+
+* **Logic:**
+  * Detects installed IDE products, automatically sorts versions into `[Active / Latest]` and `[Legacy / Orphan]`.
+  * Scans cache subdirectories (`caches`, `index`, `compile-server`, `log`, etc.) older than 30 days.
+  * Optionally purges entire obsolete/legacy IDE directories when `-PurgeOldVersions` is specified.
+* **Safety:** Runs in **Dry Run** mode by default. Warns if active IDE processes are running. Provides interactive next steps after every scan.
+* **Usage:**
+    ```powershell
+    # Preview deletion (default 30 days retention)
+    .\Clean-JetBrainsCache.ps1
+
+    # Execute deletion
+    .\Clean-JetBrainsCache.ps1 -Force
+
+    # Purge entire legacy IDE versions + clean active caches
+    .\Clean-JetBrainsCache.ps1 -PurgeOldVersions -Force
+
+    # Purge all caches regardless of age
+    .\Clean-JetBrainsCache.ps1 -DaysRetention 0 -Force
+    ```
+
 ## ⚠️ Disclaimer
 
 These scripts are provided "as is". 
 * **CopyJira** does not crack encryption; it automates legitimate UI interactions to save physical effort.
-* **Clean-GradleCache** & **Clean-VSCodeCache** delete files. Double-check the output before forcing deletion.
+* **Clean-*Cache** scripts delete files. Double-check the output before forcing deletion.
 
 ## 👤 Author
 
