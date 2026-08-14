@@ -74,6 +74,40 @@ JetBrains IDEs (IntelliJ IDEA, CLion, PyCharm, Rider, WebStorm, etc.) and Google
     .\Clean-JetBrainsCache.ps1 -DaysRetention 0 -Force
     ```
 
+### 5. Clean-QtCreatorCache.ps1 (The Clangd Purger)
+Qt Creator and modern C++ extensions produce large Clangd AST symbol index caches and QML compilation temporary files.
+
+* **Logic:** Scans `%LOCALAPPDATA%\clangd\index`, `%LOCALAPPDATA%\QtProject\QtCreator`, and `%APPDATA%\QtProject\qtcreator` for caches and logs older than 30 days.
+* **Safety:** Runs in **Dry Run** mode by default. Warns if Qt Creator or Clangd processes are active. Preserves IDE settings.
+* **Usage:**
+    ```powershell
+    # Preview deletion (default 30 days retention)
+    .\Clean-QtCreatorCache.ps1
+
+    # Execute deletion
+    .\Clean-QtCreatorCache.ps1 -Force
+
+    # Purge all caches regardless of age
+    .\Clean-QtCreatorCache.ps1 -DaysRetention 0 -Force
+    ```
+
+### 6. Clean-NuGetCache.ps1 (The Package Reclaimer)
+.NET, C#, and C++ CLI builds accumulate gigabytes of immutable package versions in the global NuGet cache.
+
+* **Logic:** Scans `%USERPROFILE%\.nuget\packages` and `%LOCALAPPDATA%\NuGet\v3-cache` for package versions older than 30 days.
+* **Safety:** Runs in **Dry Run** mode by default. Warns if active build processes are running.
+* **Usage:**
+    ```powershell
+    # Preview deletion (default 30 days retention)
+    .\Clean-NuGetCache.ps1
+
+    # Execute deletion
+    .\Clean-NuGetCache.ps1 -Force
+
+    # Purge all package versions regardless of age
+    .\Clean-NuGetCache.ps1 -DaysRetention 0 -Force
+    ```
+
 ## ⚠️ Disclaimer
 
 These scripts are provided "as is". 
