@@ -1,11 +1,12 @@
 {
   "productName": "CoreBankingSystem",
-  "projectRoot": ".",
+  "projectRoot": "",
   "apiKey": "",
   "userKey": "",
   "projects": [
     {
       "name": "AuthService",
+      "versionRule": "android",
       "paths": [
         "services/auth-service",
         "shared/common-utils",

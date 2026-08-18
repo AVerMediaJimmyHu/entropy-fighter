@@ -28,9 +28,7 @@ param (
     [Parameter(Mandatory = $true)]
     [string]$ConfigFile,
 
-    [Parameter(Mandatory = $true)]
     [string]$VersionTag,
-
     [string]$ProjectRoot,
     [string]$MendDir = (Join-Path $PSScriptRoot "Mend_Windows_scan-OfflineScan"),
     [string]$ApiKey = $env:MEND_API_KEY,
@@ -40,7 +38,17 @@ param (
     [switch]$PauseBeforeScan
 )
 
+# Script Version: 1.4.0
+# Last Updated  : 2026-08-18
+
+$ScriptVersion = "1.4.0"
 $ErrorActionPreference = "Stop"
+
+# 載入獨立版本解析模組
+$versionResolverScript = Join-Path $PSScriptRoot "Resolve-ProjectVersion.ps1"
+if (Test-Path $versionResolverScript) {
+    . $versionResolverScript
+}
 
 # ==========================================
 # 輔助函式：安全清理 (僅卸載 Junction，絕不傷及 Target 原始碼)
@@ -265,10 +273,10 @@ $UploadConfig = Join-Path $UploadDir "Config\Upload-wss-unified-agent.config"
 $UpdateRequestFile = Join-Path $ScanDir "whitesource\update-request.txt"
 
 Write-Host "========================================================" -ForegroundColor Cyan
-Write-Host " Mend Batch Scan Runner" -ForegroundColor Cyan
+Write-Host " Mend Batch Scan Runner (v$ScriptVersion)" -ForegroundColor Cyan
 Write-Host " Config File   : $($ConfigFileObj.Path)"
 Write-Host " Product Name  : $ProductName"
-Write-Host " Version Tag   : $VersionTag"
+Write-Host " Default Tag   : $VersionTag"
 Write-Host " Project Root  : $ResolvedProjectRoot"
 Write-Host " Target Staging: $SourceCodeDir"
 Write-Host " Scan Dir      : $ScanDir"
@@ -281,7 +289,10 @@ Write-Host "========================================================" -Foregroun
 # ==========================================
 foreach ($proj in $config.projects) {
     $ProjectBaseName = $proj.name
-    $ProjectFullName = "${ProjectBaseName}-${VersionTag}"
+
+    # 動態萃取子專案版本號
+    $projVersion = Resolve-ProjectVersion -ProjectRoot $ResolvedProjectRoot -ProjectConfig $proj -DefaultVersionTag $VersionTag
+    $ProjectFullName = "${ProjectBaseName}-${projVersion}"
     $originalPathEnv = $env:PATH
 
     Write-Host "`n>>> [專案開始] 處理目標: $ProjectFullName" -ForegroundColor Yellow
@@ -357,8 +368,11 @@ foreach ($proj in $config.projects) {
             Read-Host "  確認無誤後請按 [Enter] 鍵繼續..."
         }
 
-        # F. DryRun 模式跳過實際掃描
+        # F. DryRun 模式輸出專案摘要並跳過實際掃描
         if ($DryRun) {
+            Write-Host "`n  [DryRun 成果] 專案基礎名稱 : $ProjectBaseName" -ForegroundColor Cyan
+            Write-Host "  [DryRun 成果] 萃取版本號   : $projVersion" -ForegroundColor Cyan
+            Write-Host "  [DryRun 成果] 最終 Mend 標籤: $ProjectFullName" -ForegroundColor Green
             Write-Host "  [DryRun] 跳過 Java 離線掃描與上傳作業。" -ForegroundColor Cyan
             continue
         }

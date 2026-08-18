@@ -96,7 +96,10 @@ BuildAgent_Workspace/
 | `apiKey` | String | 否 | Mend 組織 API Key。若專案屬於特定部門 Org 可直接填入（支援階層式覆蓋）。 |
 | `userKey` | String | 否 | Mend 使用者/服務帳號 Key。建議由 CI/CD 環境變數注入，亦可填在此處。 |
 | `projects` | Array | **是** | 需掃描的子專案清單。 |
-| `projects[].name` | String | **是** | 專案基礎名稱（掃描時會自動後綴 `-${VersionTag}`）。 |
+| `projects[].name` | String | **是** | 專案基礎名稱（掃描時會自動後綴 `-${ResolvedVersion}`）。 |
+| `projects[].version` | String | 否 | 手動指定該專案固定版本（優先權最高）。若填 `"auto"` 或留空則觸發自動萃取。 |
+| `projects[].versionRule` | String | 否 | 版本萃取規則。目前支援：`"android"`（自動讀取 `build.gradle.kts` / `build.gradle` / `gradle.properties` 的純版本號）。未指定則使用全域 `VersionTag`。 |
+| `projects[].versionFile` | String | 否 | 自訂版本檔案路徑（如 `app/build.gradle.kts` 或 `version.properties`）。 |
 | `projects[].paths` | Array (String) | **是** | 該專案需納入掃描的目錄清單（相對於專案根目錄）。**必須遵守以下安全規則**。 |
 
 ---
@@ -125,7 +128,7 @@ $$\text{1. CLI 參數傳入 (-ApiKey / -UserKey)} \;\longrightarrow\; \text{2. �
 | 參數名稱 | 型別 | 必填 | 預設值 | 說明 |
 | :--- | :--- | :---: | :--- | :--- |
 | `-ConfigFile` | String | **是** | - | `mend-config.json` 的檔案路徑 (例如 `.\.jenkins\mend-config.json`)。 |
-| `-VersionTag` | String | **是** | - | 建置版本標籤 (例如 `2026.08.18`, `1.0.0`, 或 Git Commit Hash)。 |
+| `-VersionTag` | String | 否 | 當前日期/自動萃取 | 全域預設建置版本標籤 (例如 `2026.08.18` 或 Git Commit Hash)。若專案設有 `versionRule` 則由程式碼自動萃取。 |
 | `-ProjectRoot` | String | 否 | 自動感知 | 專案根目錄路徑。若未提供，腳本會自設定檔所在目錄或其父目錄自動解析。 |
 | `-MendDir` | String | 否 | `.\Mend_Windows_scan-OfflineScan` | Mend 工具包根目錄。 |
 | `-ApiKey` | String | 否 | `$env:MEND_API_KEY` | Mend 組織 API Key。 |
