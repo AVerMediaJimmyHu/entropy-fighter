@@ -1,0 +1,31 @@
+{
+  "productName": "CoreBankingSystem",
+  "projectRoot": ".",
+  "apiKey": "",
+  "userKey": "",
+  "projects": [
+    {
+      "name": "AuthService",
+      "paths": [
+        "services/auth-service",
+        "shared/common-utils",
+        "shared/legacy-crypto"
+      ]
+    },
+    {
+      "name": "PaymentService",
+      "paths": [
+        "services/payment-service",
+        "shared/common-utils",
+        "libs/external-gateway"
+      ]
+    },
+    {
+      "name": "LegacyDesktopClient",
+      "paths": [
+        "client/desktop-app",
+        "shared/legacy-framework"
+      ]
+    }
+  ]
+}
