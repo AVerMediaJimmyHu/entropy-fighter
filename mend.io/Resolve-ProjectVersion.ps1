@@ -396,6 +396,81 @@ function Resolve-ProjectVersion {
             }
         }
 
+        { $_ -in @("ios", "xcode", "apple", "macos-app") } {
+            Write-Host "  [版本探測] 專案 [$projName] 開始搜尋 iOS / Xcode 版本定義..." -ForegroundColor Cyan
+
+            $rawCandidates = @()
+            if (-not [string]::IsNullOrWhiteSpace($versionFile)) {
+                $rawCandidates += (Join-Path $ProjectRoot $versionFile)
+            } else {
+                # A. 優先檢查專案掛載路徑
+                if ($ProjectConfig.paths) {
+                    foreach ($p in $ProjectConfig.paths) {
+                        $cleanP = $p.Replace('/', '\').TrimStart('\')
+                        if ($cleanP -like "*.pbxproj" -or $cleanP -like "*.plist" -or $cleanP -like "*.xcconfig" -or $cleanP -like "*.podspec") {
+                            $rawCandidates += (Join-Path $ProjectRoot $cleanP)
+                        } else {
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\*.xcodeproj\project.pbxproj")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\project.pbxproj")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\Info.plist")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\*.xcconfig")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\*.podspec")
+                        }
+                    }
+                }
+                # B. 檢查專案根目錄
+                $rawCandidates += @(
+                    (Join-Path $ProjectRoot "*.xcodeproj\project.pbxproj"),
+                    (Join-Path $ProjectRoot "Info.plist"),
+                    (Join-Path $ProjectRoot "*.xcconfig"),
+                    (Join-Path $ProjectRoot "*.podspec")
+                )
+            }
+
+            # 展開萬用字元候選項目
+            $targetFiles = @()
+            foreach ($cand in $rawCandidates) {
+                if ($cand -like "*[*?]*") {
+                    $matched = Get-ChildItem -Path $cand -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+                    if ($matched) { $targetFiles += $matched }
+                } else {
+                    $targetFiles += $cand
+                }
+            }
+            $targetFiles = @($targetFiles | Select-Object -Unique)
+
+            foreach ($file in $targetFiles) {
+                if (Test-Path $file) {
+                    Write-Host "  [版本探測] 找到檔案: $file" -ForegroundColor DarkGray
+                    $content = Get-Content -Path $file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if (-not [string]::IsNullOrWhiteSpace($content)) {
+                        # 1. 嘗試 project.pbxproj 或 .xcconfig 中的 MARKETING_VERSION
+                        if ($content -match '(?m)^\s*MARKETING_VERSION\s*=\s*([0-9\.]+)\s*;?') {
+                            $extractedVersion = $matches[1].Trim()
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [ios] MARKETING_VERSION 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+
+                        # 2. 嘗試 Info.plist 中的 CFBundleShortVersionString
+                        if ($content -match '(?s)<key>CFBundleShortVersionString</key>\s*<string>([0-9\.]+)</string>') {
+                            $extractedVersion = $matches[1].Trim()
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [ios] Info.plist 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+
+                        # 3. 嘗試 CocoaPods podspec 中的 s.version
+                        if ($content -match '(?m)^\s*(?:s|spec)\.version\s*=\s*["'']([0-9\.]+)["'']') {
+                            $extractedVersion = $matches[1].Trim()
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [ios] podspec 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+                    }
+                } else {
+                    Write-Host "  [版本探測] (略過) 檔案不存在: $file" -ForegroundColor DarkGray
+                }
+            }
+        }
+
         default {
             Write-Warning "  [版本萃取] 尚未支援的 versionRule: '$rule'，將採用預設版本。"
         }

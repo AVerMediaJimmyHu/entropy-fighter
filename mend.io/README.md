@@ -24,30 +24,27 @@
 ```text
 BuildAgent_Workspace/
 │
-├── Mend_Windows_scan-OfflineScan/        # 顧問/官方提供之工具包目錄 (可透過 -MendDir 覆寫)
-│   ├── Config/ (或 Scan/Config/)
-│   │   ├── UnifiedAgent/
-│   │   │   └── wss-unified-agent-*.jar   # Mend Unified Agent 核心 Jar
-│   │   └── zulu11.68.17/                 # 隨附 JRE 環境 (內含 bin/java.exe)
-│   ├── Scan/
-│   │   ├── Config/
-│   │   │   └── Scan-wss-unified-agent.config
-│   │   ├── SourceCode/                   # 鏡像掛載與掃描之暫存根目錄 (services/auth-service...)
-│   │   └── whitesource/
-│   │       └── update-request.txt        # Unified Agent 離線掃描產物
+├── Mend_Windows_scan-OfflineScan/        # Windows 工具包目錄
+│   ├── Config/
+│   ├── Scan/SourceCode/                  # 鏡像掛載與掃描之暫存根目錄
 │   └── Upload/
-│       ├── Config/
-│       │   └── Upload-wss-unified-agent.config
-│       └── whitesource/                  # 上傳記錄檔目錄
+│
+├── Mend_Mac_scan-OfflineScan/            # macOS 工具包目錄 (亦支援直接指定 WS-OfflineScan)
+│   └── WS-OfflineScan/
+│       ├── Config/ (內含 zulu-JDK-11 與 UnifiedAgent)
+│       ├── Scan/SourceCode/
+│       └── Upload/
 │
 ├── your-project/                         # Git Clone 的應用程式專案根目錄
 │   ├── .jenkins/ (或 configs/)
-│   │   └── mend-config.json              # 專案相依與產品設定檔
+│   │   └── mend-config.json              # 專案相依與產品設定檔 (Windows/macOS 完全共用)
 │   ├── services/
 │   └── shared/
 │
-├── Invoke-MendBatchScan.ps1              # 核心自動化掃描腳本 (v1.7.0)
-└── Resolve-ProjectVersion.ps1            # 多技術棧版本萃取模組 (v1.5.0)
+├── Invoke-MendBatchScan.ps1              # Windows 核心自動化掃描腳本 (v1.7.0)
+├── Resolve-ProjectVersion.ps1            # Windows 版本萃取模組 (v1.5.0)
+├── invoke-mend-batch-scan.sh             # macOS / Linux 核心自動化掃描腳本 (v1.0.0)
+└── resolve-project-version.sh           # macOS / Linux 版本萃取模組 (v1.5.0)
 ```
 
 ---
@@ -102,11 +99,11 @@ BuildAgent_Workspace/
 | `userKey` | String | 否 | Mend 使用者/服務帳號 Key。建議由 CI/CD 環境變數注入，亦可填在此處。 |
 | `projects` | Array | **是** | 需掃描的子專案清單。 |
 | `projects[].name` | String | **是** | 專案基礎名稱。 |
-| `projects[].platform` | String | 否 | 目標平台過濾。可填 `"windows"`, `"win"`, `"macos"`, `"all"`（預設為 `"all"`）。若指定特定平台，產出的 Mend 標籤會自動組合為 `${name}-${platform}-${version}`；Windows 執行時會自動略過標記為非 Windows 的項目。 |
+| `projects[].platform` | String | 否 | 目標平台過濾。可填 `"windows"`, `"win"`, `"macos"`, `"ios"`, `"all"`（預設為 `"all"`）。若指定特定平台，產出的 Mend 標籤會自動組合為 `${name}-${platform}-${version}`；執行環境會自動跳過不相容之平台（例如 Windows 跳過 macOS/iOS，macOS 跳過 Windows）。 |
 | `projects[].version` | String | 否 | 手動指定該專案固定版本（優先權最高）。若填 `"auto"` 或留空則觸發自動萃取。 |
 | `projects[].versionRule` | String | 否 | 版本萃取規則（詳見第 4 節）。未指定則使用全域 `VersionTag`。 |
 | `projects[].versionFile` | String | 否 | 自訂版本檔案相對路徑（用於精確覆蓋預設搜尋目錄）。 |
-| `projects[].paths` | Array (String) | **是** | 該專案需納入掃描的目錄或檔案清單（相對於專案根目錄）。支援：<br>1. **子目錄**：自動建立 NTFS Junction 虛擬鏡像。<br>2. **單一檔案**：自動建立 NTFS HardLink（如 `"buildspec.json"`, `"CMakeLists.txt"`）。<br>3. **萬用字元 (`*` / `?`)**：支援模式匹配（如 `"configs/*.json"`, `"plugins/*"`）。 |
+| `projects[].paths` | Array (String) | **是** | 該專案需納入掃描的目錄或檔案清單（相對於專案根目錄）。支援：<br>1. **子目錄**：自動建立 NTFS Junction / POSIX Symlink 虛擬鏡像。<br>2. **單一檔案**：自動建立 NTFS HardLink / Symlink。<br>3. **萬用字元 (`*` / `?`)**：支援模式匹配（如 `"configs/*.json"`, `"plugins/*"`）。 |
 
 ---
 
@@ -124,13 +121,13 @@ $$\text{1. CLI 參數傳入 (-ApiKey / -UserKey)} \;\longrightarrow\; \text{2. �
 > ### ⚠️ 路徑安全限制與虛擬掛載規範 (Path Validation Rules)
 > 1. **強制相對路徑**：基準為解析後的專案根目錄 (`ProjectRoot`)。**嚴禁使用絕對路徑**（如 `C:\repo` 或 `D:\libs`），一旦偵測到絕對路徑將立即拋出例外並中止作業。
 > 2. **禁止目錄逃逸 (No Path Traversal)**：若路徑包含 `..`，解析後的真實路徑必須嚴格位於專案根目錄範疇之內。若超出專案範圍（例如 `../../OtherRepo`），將直接阻斷並拋出例外。
-> 3. **安全解除掛載保證**：目錄採用 Junction、檔案採用 HardLink。掃描前組裝與掃描後清理均只卸載連接點與暫存指標，**100% 保證絕不修改或刪除原始原始碼與檔案**。
+> 3. **安全解除掛載保證**：目錄採用 Junction/Symlink、檔案採用 HardLink/Symlink。掃描前組裝與掃描後清理均只卸載連接點與暫存指標，**100% 保證絕不修改或刪除原始原始碼與檔案**。
 
 ---
 
 ## 4. 多技術棧版本萃取機制 (`versionRule` 與 `versionFile`)
 
-為了支援 Monorepo / 多技術棧專案在同一次建置中動態套用各自獨立的語意化版本號（Semantic Versioning），系統採用模組化版本解析器 ([`Resolve-ProjectVersion.ps1`](file:///D:/work/Mend_Offline_UA/Resolve-ProjectVersion.ps1))。
+為了支援 Monorepo / 多技術棧專案在同一次建置中動態套用各自獨立的語意化版本號（Semantic Versioning），系統採用模組化版本解析器 ([`Resolve-ProjectVersion.ps1`](file:///D:/work/Mend_Offline_UA/Resolve-ProjectVersion.ps1) / [`resolve-project-version.sh`](file:///D:/work/Mend_Offline_UA/resolve-project-version.sh))。
 
 ### 階層式版本解析優先順序 (Resolution Priority)
 
@@ -140,10 +137,10 @@ $$\text{1. JSON projects[].version 手動指定} \;\longrightarrow\; \text{2. ve
 
 ### `versionRule` 與 `versionFile` 的協同關係
 
-* **`versionRule`（策略名稱）**：決定使用哪種專用語法解析器（如 Android Gradle、OBS buildspec、Qt CMake、Qt qmake 或純文字檔）。
+* **`versionRule`（策略名稱）**：決定使用哪種專用語法解析器（如 Android Gradle、OBS buildspec、Qt CMake、Qt qmake、iOS Xcode 或純文字檔）。
 * **`versionFile`（明確路徑覆寫，可選）**：
   * **若未指定 `versionFile`**：解析器會依照該規則的慣用目錄結構（優先檢查掛載路徑 `$p`、子模組 `$p/app`、專案根目錄）進行智慧探測。
-  * **若有指定 `versionFile`**：解析器直接鎖定該特定相對路徑（例如 `"versionFile": "submodules/app/build.gradle.kts"` 或 `"versionFile": "firmware/VERSION"`），跳過通用搜尋。
+  * **若有指定 `versionFile`**：解析器直接鎖定該特定相對路徑（例如 `"versionFile": "submodules/app/build.gradle.kts"` 或 `"versionFile": "MyProject.xcodeproj/project.pbxproj"`），跳過通用搜尋。
 
 ---
 
@@ -155,6 +152,7 @@ $$\text{1. JSON projects[].version 手動指定} \;\longrightarrow\; \text{2. ve
 | **`buildspec`**<br>(或 `obs-plugin`) | OBS 插件 / buildspec | 1. `$p/buildspec.json`<br>2. 根目錄 `buildspec.json` | • JSON 頂層 `"version": "2.4.19"` 欄位 |
 | **`qt-cmake`**<br>(或 `cmake`) | Qt (CMake) | 1. `$p/CMakeLists.txt`<br>2. 根目錄 `CMakeLists.txt` | • `set(APP_VERSION_MAJOR 4)` + `MINOR` + `BUILD` $\to$ `4.0.9`<br>• `set(PROJECT_VERSION_MAJOR ...)`<br>• `project(... VERSION 4.0.9)`<br>• `set(PROJECT_VERSION "4.0.9")` |
 | **`qt-qmake`**<br>(或 `pri`, `qmake`) | Qt (qmake) | 1. `$p/versions.pri`<br>2. `$p/*.pri` / `$p/*.pro`<br>3. 根目錄 `versions.pri` | • `APP_VERSION_MAJOR = 1` + `MINOR` + `MAINTENANCE` + `BUILD` $\to$ `1.1.2.72`<br>• `VERSION_MAJOR = 1` ...<br>• `VERSION = 1.1.2` |
+| **`ios`**<br>(或 `xcode`) | iOS / macOS (Xcode) | 1. `$p/*.xcodeproj/project.pbxproj`<br>2. `$p/Info.plist`<br>3. `$p/*.xcconfig`<br>4. `$p/*.podspec` | • `MARKETING_VERSION = 1.2.3;`<br>• `<key>CFBundleShortVersionString</key><string>1.2.3</string>`<br>• `s.version = '1.2.3'` |
 | **`file`**<br>(或 `plain-file`) | 純文字版本檔 | 1. `$p/VERSION` / `$p/version.txt`<br>2. 根目錄 `VERSION` | • 讀取該檔案第一行非空白字串（自動 `Trim()`） |
 
 ---
@@ -167,9 +165,10 @@ $$\text{1. JSON projects[].version 手動指定} \;\longrightarrow\; \text{2. ve
   "projectRoot": "..",
   "projects": [
     {
-      "name": "StudioControl-Android",
-      "versionRule": "android",
-      "paths": ["app"]
+      "name": "LiveStreamer",
+      "platform": "ios",
+      "versionRule": "ios",
+      "paths": ["LiveStreamer.xcodeproj", "LiveStreamer/Sources"]
     },
     {
       "name": "StreamingCenterPLUG",
@@ -252,6 +251,35 @@ $env:MEND_USER_KEY = "your-user-key"
 .\Invoke-MendBatchScan.ps1 `
     -ConfigFile "D:\work\your-project\configs\mend-config.json" `
     -VersionTag "2026.08.18.1"
+```
+
+---
+
+### macOS / Linux CLI 執行範例 (`invoke-mend-batch-scan.sh`)
+
+首先賦予執行權限：
+```bash
+chmod +x ./invoke-mend-batch-scan.sh ./resolve-project-version.sh
+```
+
+#### 1. 快速驗證 Symlink 鏡像目錄結構 (Dry-Run 模式)
+
+```bash
+./invoke-mend-batch-scan.sh \
+    --config-file "./configs/mend-config.json" \
+    --version-tag "local-test" \
+    --dry-run
+```
+
+#### 2. 正式執行掃描與上傳 (自動讀取環境變數憑證)
+
+```bash
+export MEND_API_KEY="your-organization-api-key"
+export MEND_USER_KEY="your-user-key"
+
+./invoke-mend-batch-scan.sh \
+    --config-file "/Users/builder/workspace/your-project/.jenkins/mend-config.json" \
+    --mend-dir "/Tools/Mend_Mac_scan-OfflineScan"
 ```
 
 ---
