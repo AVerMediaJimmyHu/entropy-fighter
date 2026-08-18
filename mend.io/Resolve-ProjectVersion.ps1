@@ -2,7 +2,7 @@
 .SYNOPSIS
     Mend.io Automation - Project Version Resolver Module
 .DESCRIPTION
-    Version: 1.0.0
+    Version: 1.5.0
     Last Updated: 2026-08-18
     職責：依據專案技術棧與規則 (versionRule) 動態萃取子專案版本號，供 Mend Batch Scan 使用。
 #>
@@ -58,16 +58,21 @@ function Resolve-ProjectVersion {
                 # A. 優先檢查專案掛載路徑（包含其底下的 app / application 子模組）
                 if ($ProjectConfig.paths) {
                     foreach ($p in $ProjectConfig.paths) {
-                        $rawCandidates += (Join-Path $ProjectRoot "$p\app\build.gradle.kts")
-                        $rawCandidates += (Join-Path $ProjectRoot "$p\app\build.gradle")
-                        $rawCandidates += (Join-Path $ProjectRoot "$p\application\build.gradle.kts")
-                        $rawCandidates += (Join-Path $ProjectRoot "$p\application\build.gradle")
-                        $rawCandidates += (Join-Path $ProjectRoot "$p\build.gradle.kts")
-                        $rawCandidates += (Join-Path $ProjectRoot "$p\build.gradle")
+                        $cleanP = $p.Replace('/', '\').TrimStart('\')
+                        if ($cleanP -like "*build.gradle.kts" -or $cleanP -like "*build.gradle") {
+                            $rawCandidates += (Join-Path $ProjectRoot $cleanP)
+                        } else {
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\app\build.gradle.kts")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\app\build.gradle")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\application\build.gradle.kts")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\application\build.gradle")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\build.gradle.kts")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\build.gradle")
 
-                        $rawPropCandidates += (Join-Path $ProjectRoot "$p\gradle.properties")
-                        $rawPropCandidates += (Join-Path $ProjectRoot "$p\version.properties")
-                        $rawPropCandidates += (Join-Path $ProjectRoot "$p\gradle\libs.versions.toml")
+                            $rawPropCandidates += (Join-Path $ProjectRoot "$cleanP\gradle.properties")
+                            $rawPropCandidates += (Join-Path $ProjectRoot "$cleanP\version.properties")
+                            $rawPropCandidates += (Join-Path $ProjectRoot "$cleanP\gradle\libs.versions.toml")
+                        }
                     }
                 }
                 # B. 檢查全域/頂層常見目錄
@@ -147,6 +152,246 @@ function Resolve-ProjectVersion {
                     } else {
                         Write-Host "  [版本探測] (略過) 屬性檔不存在: $propFile" -ForegroundColor DarkGray
                     }
+                }
+            }
+        }
+
+        { $_ -in @("buildspec", "buildspec.json", "obs-plugin") } {
+            Write-Host "  [版本探測] 專案 [$projName] 開始搜尋 buildspec.json 版本定義..." -ForegroundColor Cyan
+
+            $rawCandidates = @()
+            if (-not [string]::IsNullOrWhiteSpace($versionFile)) {
+                $rawCandidates += (Join-Path $ProjectRoot $versionFile)
+            } else {
+                # A. 優先檢查專案掛載路徑 (支援直接指定檔案或目錄)
+                if ($ProjectConfig.paths) {
+                    foreach ($p in $ProjectConfig.paths) {
+                        $cleanP = $p.Replace('/', '\').TrimStart('\')
+                        if ($cleanP -like "*buildspec.json" -or $cleanP -like "*.json") {
+                            $rawCandidates += (Join-Path $ProjectRoot $cleanP)
+                        } else {
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\buildspec.json")
+                        }
+                    }
+                }
+                # B. 檢查專案根目錄
+                $rawCandidates += (Join-Path $ProjectRoot "buildspec.json")
+            }
+
+            $targetFiles = @($rawCandidates | Select-Object -Unique)
+
+            foreach ($file in $targetFiles) {
+                if (Test-Path $file) {
+                    Write-Host "  [版本探測] 找到檔案: $file" -ForegroundColor DarkGray
+                    try {
+                        $jsonRaw = Get-Content -Path $file -Raw -Encoding UTF8 -ErrorAction Stop
+                        $specObj = $jsonRaw | ConvertFrom-Json
+                        if ($specObj.version) {
+                            $extractedVersion = $specObj.version.ToString().Trim()
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [buildspec] 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+                    } catch {
+                        Write-Warning "  [版本探測] 解析 JSON 檔案失敗: $file - $($_.Exception.Message)"
+                    }
+                } else {
+                    Write-Host "  [版本探測] (略過) 檔案不存在: $file" -ForegroundColor DarkGray
+                }
+            }
+        }
+
+        { $_ -in @("qt-qmake", "qmake", "pri") } {
+            Write-Host "  [版本探測] 專案 [$projName] 開始搜尋 qmake / pri 版本定義..." -ForegroundColor Cyan
+
+            $rawCandidates = @()
+            if (-not [string]::IsNullOrWhiteSpace($versionFile)) {
+                $rawCandidates += (Join-Path $ProjectRoot $versionFile)
+            } else {
+                # A. 優先檢查專案掛載路徑
+                if ($ProjectConfig.paths) {
+                    foreach ($p in $ProjectConfig.paths) {
+                        $cleanP = $p.Replace('/', '\').TrimStart('\')
+                        if ($cleanP -like "*.pri" -or $cleanP -like "*.pro") {
+                            $rawCandidates += (Join-Path $ProjectRoot $cleanP)
+                        } else {
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\versions.pri")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\version.pri")
+                        }
+                    }
+                }
+                # B. 檢查專案根目錄
+                $rawCandidates += @(
+                    (Join-Path $ProjectRoot "versions.pri"),
+                    (Join-Path $ProjectRoot "version.pri")
+                )
+            }
+
+            $targetFiles = @($rawCandidates | Select-Object -Unique)
+
+            foreach ($file in $targetFiles) {
+                if (Test-Path $file) {
+                    Write-Host "  [版本探測] 找到檔案: $file" -ForegroundColor DarkGray
+                    $content = Get-Content -Path $file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if (-not [string]::IsNullOrWhiteSpace($content)) {
+                        # 1. 優先嘗試組合 APP_VERSION_MAJOR / MINOR / MAINTENANCE / BUILD
+                        $major = if ($content -match '(?m)^\s*APP_VERSION_MAJOR\s*=\s*([0-9]+)') { $matches[1].Trim() } else { $null }
+                        $minor = if ($content -match '(?m)^\s*APP_VERSION_MINOR\s*=\s*([0-9]+)') { $matches[1].Trim() } else { $null }
+                        $maint = if ($content -match '(?m)^\s*APP_VERSION_(?:MAINTENANCE|PATCH)\s*=\s*([0-9]+)') { $matches[1].Trim() } else { $null }
+                        $build = if ($content -match '(?m)^\s*APP_VERSION_BUILD\s*=\s*([0-9]+)') { $matches[1].Trim() } else { $null }
+
+                        if ($major -and $minor) {
+                            $verParts = @($major, $minor)
+                            if ($maint) { $verParts += $maint }
+                            if ($build) { $verParts += $build }
+                            $extractedVersion = $verParts -join '.'
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [qt-qmake] APP_VERSION 變數從 [$(Split-Path $file -Leaf)] 成功組合: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+
+                        # 2. 嘗試通用 VERSION_MAJOR / MINOR / MAINTENANCE / BUILD
+                        $major = if ($content -match '(?m)^\s*VERSION_MAJOR\s*=\s*([0-9]+)') { $matches[1].Trim() } else { $null }
+                        $minor = if ($content -match '(?m)^\s*VERSION_MINOR\s*=\s*([0-9]+)') { $matches[1].Trim() } else { $null }
+                        $maint = if ($content -match '(?m)^\s*VERSION_(?:MAINTENANCE|PATCH)\s*=\s*([0-9]+)') { $matches[1].Trim() } else { $null }
+                        $build = if ($content -match '(?m)^\s*VERSION_BUILD\s*=\s*([0-9]+)') { $matches[1].Trim() } else { $null }
+
+                        if ($major -and $minor) {
+                            $verParts = @($major, $minor)
+                            if ($maint) { $verParts += $maint }
+                            if ($build) { $verParts += $build }
+                            $extractedVersion = $verParts -join '.'
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [qt-qmake] VERSION 變數從 [$(Split-Path $file -Leaf)] 成功組合: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+
+                        # 3. 嘗試單行 VERSION = x.y.z 或 APP_VERSION = x.y.z
+                        if ($content -match '(?m)^\s*(?:APP_VERSION|VERSION)\s*=\s*([0-9\.]+)') {
+                            $extractedVersion = $matches[1].Trim()
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [qt-qmake] 單行 VERSION 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+                    }
+                } else {
+                    Write-Host "  [版本探測] (略過) 檔案不存在: $file" -ForegroundColor DarkGray
+                }
+            }
+        }
+
+        { $_ -in @("file", "plain-file") } {
+            Write-Host "  [版本探測] 專案 [$projName] 開始讀取純文字版本檔案..." -ForegroundColor Cyan
+
+            $rawCandidates = @()
+            if (-not [string]::IsNullOrWhiteSpace($versionFile)) {
+                $rawCandidates += (Join-Path $ProjectRoot $versionFile)
+            } else {
+                # A. 優先檢查專案掛載路徑
+                if ($ProjectConfig.paths) {
+                    foreach ($p in $ProjectConfig.paths) {
+                        $cleanP = $p.Replace('/', '\').TrimStart('\')
+                        if ($cleanP -like "*VERSION*" -or $cleanP -like "*version*") {
+                            $rawCandidates += (Join-Path $ProjectRoot $cleanP)
+                        } else {
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\VERSION")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\version.txt")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\VERSION.txt")
+                        }
+                    }
+                }
+                # B. 檢查專案根目錄
+                $rawCandidates += @(
+                    (Join-Path $ProjectRoot "VERSION"),
+                    (Join-Path $ProjectRoot "version.txt"),
+                    (Join-Path $ProjectRoot "VERSION.txt")
+                )
+            }
+
+            $targetFiles = @($rawCandidates | Select-Object -Unique)
+
+            foreach ($file in $targetFiles) {
+                if (Test-Path $file) {
+                    Write-Host "  [版本探測] 找到檔案: $file" -ForegroundColor DarkGray
+                    $content = Get-Content -Path $file -TotalCount 1 -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if (-not [string]::IsNullOrWhiteSpace($content)) {
+                        $extractedVersion = $content.Trim()
+                        Write-Host "  [版本萃取] 專案 [$projName] 依據 [file] 從 [$(Split-Path $file -Leaf)] 成功讀取: $extractedVersion" -ForegroundColor Green
+                        break
+                    }
+                } else {
+                    Write-Host "  [版本探測] (略過) 檔案不存在: $file" -ForegroundColor DarkGray
+                }
+            }
+        }
+
+        { $_ -in @("qt-cmake", "cmake") } {
+            Write-Host "  [版本探測] 專案 [$projName] 開始搜尋 CMakeLists.txt 版本定義..." -ForegroundColor Cyan
+
+            $rawCandidates = @()
+            if (-not [string]::IsNullOrWhiteSpace($versionFile)) {
+                $rawCandidates += (Join-Path $ProjectRoot $versionFile)
+            } else {
+                # A. 優先檢查專案掛載路徑
+                if ($ProjectConfig.paths) {
+                    foreach ($p in $ProjectConfig.paths) {
+                        $cleanP = $p.Replace('/', '\').TrimStart('\')
+                        if ($cleanP -like "*CMakeLists.txt") {
+                            $rawCandidates += (Join-Path $ProjectRoot $cleanP)
+                        } else {
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\CMakeLists.txt")
+                        }
+                    }
+                }
+                # B. 檢查專案根目錄
+                $rawCandidates += (Join-Path $ProjectRoot "CMakeLists.txt")
+            }
+
+            $targetFiles = @($rawCandidates | Select-Object -Unique)
+
+            foreach ($file in $targetFiles) {
+                if (Test-Path $file) {
+                    Write-Host "  [版本探測] 找到檔案: $file" -ForegroundColor DarkGray
+                    $content = Get-Content -Path $file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                    if (-not [string]::IsNullOrWhiteSpace($content)) {
+                        # 1. 優先嘗試組合 set(APP_VERSION_MAJOR 4) / MINOR / BUILD / PATCH
+                        $major = if ($content -match '(?mi)^\s*set\s*\(\s*APP_VERSION_MAJOR\s+([0-9]+)\s*\)') { $matches[1].Trim() } else { $null }
+                        $minor = if ($content -match '(?mi)^\s*set\s*\(\s*APP_VERSION_MINOR\s+([0-9]+)\s*\)') { $matches[1].Trim() } else { $null }
+                        $build = if ($content -match '(?mi)^\s*set\s*\(\s*APP_VERSION_(?:BUILD|PATCH|MAINTENANCE)\s+([0-9]+)\s*\)') { $matches[1].Trim() } else { $null }
+
+                        if ($major -and $minor) {
+                            $verParts = @($major, $minor)
+                            if ($build) { $verParts += $build }
+                            $extractedVersion = $verParts -join '.'
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [qt-cmake] APP_VERSION 變數從 [$(Split-Path $file -Leaf)] 成功組合: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+
+                        # 2. 嘗試通用 set(VERSION_MAJOR 4) 或 set(PROJECT_VERSION_MAJOR 4)
+                        $major = if ($content -match '(?mi)^\s*set\s*\(\s*(?:PROJECT_)?VERSION_MAJOR\s+([0-9]+)\s*\)') { $matches[1].Trim() } else { $null }
+                        $minor = if ($content -match '(?mi)^\s*set\s*\(\s*(?:PROJECT_)?VERSION_MINOR\s+([0-9]+)\s*\)') { $matches[1].Trim() } else { $null }
+                        $build = if ($content -match '(?mi)^\s*set\s*\(\s*(?:PROJECT_)?VERSION_(?:BUILD|PATCH|MAINTENANCE)\s+([0-9]+)\s*\)') { $matches[1].Trim() } else { $null }
+
+                        if ($major -and $minor) {
+                            $verParts = @($major, $minor)
+                            if ($build) { $verParts += $build }
+                            $extractedVersion = $verParts -join '.'
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [qt-cmake] VERSION 變數從 [$(Split-Path $file -Leaf)] 成功組合: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+
+                        # 3. 嘗試 project(... VERSION 4.0.9 ...) 直接定義數字
+                        if ($content -match '(?s)project\s*\([^)]*VERSION\s+([0-9\.]+)') {
+                            $extractedVersion = $matches[1].Trim()
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [qt-cmake] project(VERSION) 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+
+                        # 4. 嘗試單行 set(PROJECT_VERSION "4.0.9") 或 set(APP_VERSION "4.0.9")
+                        if ($content -match '(?mi)^\s*set\s*\(\s*(?:PROJECT_VERSION|APP_VERSION|VERSION)\s+["'']?([0-9\.]+)["'']?\s*\)') {
+                            $extractedVersion = $matches[1].Trim()
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [qt-cmake] set(VERSION) 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+                    }
+                } else {
+                    Write-Host "  [版本探測] (略過) 檔案不存在: $file" -ForegroundColor DarkGray
                 }
             }
         }

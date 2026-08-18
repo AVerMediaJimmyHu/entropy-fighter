@@ -23,6 +23,7 @@
     },
     {
       "name": "LegacyDesktopClient",
+      "platform": "windows",
       "paths": [
         "client/desktop-app",
         "shared/legacy-framework"

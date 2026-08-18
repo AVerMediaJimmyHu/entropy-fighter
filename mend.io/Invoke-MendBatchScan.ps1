@@ -38,10 +38,10 @@ param (
     [switch]$PauseBeforeScan
 )
 
-# Script Version: 1.4.0
+# Script Version: 1.7.0
 # Last Updated  : 2026-08-18
 
-$ScriptVersion = "1.4.0"
+$ScriptVersion = "1.7.0"
 $ErrorActionPreference = "Stop"
 
 # 載入獨立版本解析模組
@@ -290,9 +290,21 @@ Write-Host "========================================================" -Foregroun
 foreach ($proj in $config.projects) {
     $ProjectBaseName = $proj.name
 
+    # 平台過濾檢查 (若宣告了非 Windows 平台則跳過)
+    $targetPlatform = if ($proj.platform) { $proj.platform.ToString().Trim().ToLower() } else { "all" }
+    $supportedWinPlatforms = @("all", "any", "windows", "win", "")
+    if ($targetPlatform -notin $supportedWinPlatforms) {
+        Write-Host "`n>>> [略過專案] 專案 [$ProjectBaseName] 指定平台為 '$($proj.platform)'，非當前 Windows 環境，略過處理。" -ForegroundColor DarkGray
+        continue
+    }
+
     # 動態萃取子專案版本號
     $projVersion = Resolve-ProjectVersion -ProjectRoot $ResolvedProjectRoot -ProjectConfig $proj -DefaultVersionTag $VersionTag
-    $ProjectFullName = "${ProjectBaseName}-${projVersion}"
+    
+    # 若有指定特定 platform (非 all)，自動將 platform 補在 version 前面 (例如 MyProject-windows-1.0.0)
+    $hasPlatformTag = -not [string]::IsNullOrWhiteSpace($proj.platform) -and $proj.platform.ToString().Trim().ToLower() -notin @("all", "any")
+    $platformPrefix = if ($hasPlatformTag) { "$($proj.platform.ToString().Trim())-" } else { "" }
+    $ProjectFullName = "${ProjectBaseName}-${platformPrefix}${projVersion}"
     $originalPathEnv = $env:PATH
 
     Write-Host "`n>>> [專案開始] 處理目標: $ProjectFullName" -ForegroundColor Yellow
@@ -302,7 +314,7 @@ foreach ($proj in $config.projects) {
         Remove-StagingDirectory -Path $SourceCodeDir
         $null = New-Item -ItemType Directory -Path $SourceCodeDir -Force
 
-        # B. 建立鏡像相對目錄階層的 Junction 虛擬目錄掛載
+        # B. 建立鏡像相對目錄階層的虛擬掛載 (支援目錄 Junction、單一檔案 HardLink 與萬用字元 *)
         $resolvedFullPaths = @()
         foreach ($pathEntry in $proj.paths) {
             # 1. 嚴格檢查：禁止絕對路徑
@@ -310,45 +322,78 @@ foreach ($proj in $config.projects) {
                 throw "[$ProjectFullName] 違反路徑安全規範：路徑 '$pathEntry' 為絕對路徑。僅允許使用相對於專案根目錄的相對路徑。"
             }
 
-            # 2. 正規化相對路徑並相對於 ResolvedProjectRoot 計算 Canonical Full Path
-            $relPath = $pathEntry.Replace('/', '\').TrimStart('\')
-            $fullSourcePath = [System.IO.Path]::GetFullPath((Join-Path $ResolvedProjectRoot $relPath))
+            # 2. 萬用字元 (*) 擴展與實體檔案/目錄搜尋
+            $normPathEntry = $pathEntry.Replace('/', '\').TrimStart('\')
+            $itemsToMount = @()
 
-            # 3. 嚴格檢查：防禦 Path Traversal 目錄逃逸 (禁止超出 ResolvedProjectRoot 範圍)
-            $isInsideRoot = $fullSourcePath.StartsWith($CanonicalProjectRoot, [System.StringComparison]::OrdinalIgnoreCase) -or ($fullSourcePath -eq ([System.IO.Path]::GetFullPath($ResolvedProjectRoot)))
-            if (-not $isInsideRoot) {
-                throw "[$ProjectFullName] 違反安全邊界規範：路徑 '$pathEntry' (解析為 '$fullSourcePath') 已超出專案根目錄範圍 ($ResolvedProjectRoot)。"
+            if ($normPathEntry -match '[\*\?]') {
+                # 包含萬用字元，進行模式搜尋
+                $searchFull = Join-Path $ResolvedProjectRoot $normPathEntry
+                $foundItems = Get-ChildItem -Path $searchFull -Force -ErrorAction SilentlyContinue
+                if (-not $foundItems) {
+                    Write-Warning "  [萬用字元匹配未果] 找不到符合 '$pathEntry' 的任何檔案或目錄。"
+                    continue
+                }
+                $itemsToMount += $foundItems
+            } else {
+                $fullSourcePath = [System.IO.Path]::GetFullPath((Join-Path $ResolvedProjectRoot $normPathEntry))
+                if (Test-Path $fullSourcePath) {
+                    $itemsToMount += (Get-Item -Path $fullSourcePath -Force)
+                } else {
+                    Write-Warning "  [Link 失敗] 找不到指定目標: $fullSourcePath"
+                    continue
+                }
             }
 
-            if (-not (Test-Path $fullSourcePath)) {
-                Write-Warning "  [Link 失敗] 找不到指定目錄: $fullSourcePath"
-                continue
+            # 3. 逐一處理匹配到的檔案或目錄
+            foreach ($item in $itemsToMount) {
+                $fullSourcePath = $item.FullName
+                $itemRelPath = $fullSourcePath.Substring($ResolvedProjectRoot.Length).TrimStart('\')
+
+                # 防禦 Path Traversal 目錄逃逸
+                $isInsideRoot = $fullSourcePath.StartsWith($CanonicalProjectRoot, [System.StringComparison]::OrdinalIgnoreCase) -or ($fullSourcePath -eq ([System.IO.Path]::GetFullPath($ResolvedProjectRoot)))
+                if (-not $isInsideRoot) {
+                    throw "[$ProjectFullName] 違反安全邊界規範：路徑 '$itemRelPath' (解析為 '$fullSourcePath') 已超出專案根目錄範圍 ($ResolvedProjectRoot)。"
+                }
+
+                $resolvedFullPaths += $fullSourcePath
+                $linkTarget = Join-Path $SourceCodeDir $itemRelPath
+                $linkParent = Split-Path $linkTarget -Parent
+
+                if (-not (Test-Path $linkParent)) {
+                    $null = New-Item -ItemType Directory -Path $linkParent -Force
+                }
+
+                if ($item.PSIsContainer) {
+                    # 目錄 -> 建立 NTFS Directory Junction
+                    $null = New-Item -ItemType Junction -Path $linkTarget -Target $fullSourcePath -Force
+                    Write-Host "  [目錄掛載 (Junction)] $itemRelPath -> $fullSourcePath" -ForegroundColor Green
+                } else {
+                    # 檔案 -> 建立 NTFS HardLink (跨磁碟則 fallback 複製)
+                    try {
+                        $null = New-Item -ItemType HardLink -Path $linkTarget -Target $fullSourcePath -Force -ErrorAction Stop
+                        Write-Host "  [檔案掛載 (HardLink)] $itemRelPath -> $fullSourcePath" -ForegroundColor Green
+                    } catch {
+                        Copy-Item -Path $fullSourcePath -Destination $linkTarget -Force
+                        Write-Host "  [檔案複製 (Fallback)] $itemRelPath -> $fullSourcePath" -ForegroundColor Green
+                    }
+                }
             }
-
-            $resolvedFullPaths += $fullSourcePath
-
-            # 4. 建立鏡像中繼目錄結構與 Junction
-            $linkTarget = Join-Path $SourceCodeDir $relPath
-            $linkParent = Split-Path $linkTarget -Parent
-
-            if (-not (Test-Path $linkParent)) {
-                $null = New-Item -ItemType Directory -Path $linkParent -Force
-            }
-
-            $null = New-Item -ItemType Junction -Path $linkTarget -Target $fullSourcePath
-            Write-Host "  [Link 掛載成功] $relPath -> $fullSourcePath" -ForegroundColor Green
         }
 
-        # C. 輸出當前組裝結果清單 (包含鏡像相對路徑)
-        Write-Host "`n  --- [SourceCode 鏡像組裝目錄結構] ---" -ForegroundColor DarkGray
+        # C. 輸出當前組裝結果清單 (包含目錄與檔案)
+        Write-Host "`n  --- [SourceCode 鏡像組裝清單] ---" -ForegroundColor DarkGray
         Get-ChildItem -Path $SourceCodeDir -Recurse | Where-Object {
-            $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint
+            ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or (-not $_.PSIsContainer)
         } | Select-Object @{
             Name = "RelativeMountPath"
             Expression = { $_.FullName.Substring($SourceCodeDir.Length).TrimStart('\') }
         }, @{
+            Name = "Type"
+            Expression = { if ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { "Directory (Junction)" } else { "File" } }
+        }, @{
             Name = "TargetRealPath"
-            Expression = { $_.Target }
+            Expression = { if ($_.Target) { $_.Target } else { "Mounted File" } }
         } | Format-Table -AutoSize | Out-String | Write-Host -ForegroundColor DarkGray
 
         # D. 專案技術棧感知：僅在 Gradle 專案時動態注入 Gradle PATH
