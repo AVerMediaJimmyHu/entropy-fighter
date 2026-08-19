@@ -376,14 +376,30 @@ function Resolve-ProjectVersion {
                             break
                         }
 
-                        # 3. 嘗試 project(... VERSION 4.0.9 ...) 直接定義數字
+                        # 3. 嘗試自訂產品前綴 set(<PREFIX>_MAJOR ...) + set(<PREFIX>_MINOR ...) + set(<PREFIX>_PATCH ...)
+                        if ($content -match '(?mi)^\s*set\s*\(\s*([A-Za-z0-9_]+)_(?:MAJOR|VERSION_MAJOR)\s+([0-9]+)\s*\)') {
+                            $prefix = $matches[1].Trim()
+                            $cMajor = $matches[2].Trim()
+                            $cMinor = if ($content -match "(?mi)^\s*set\s*\(\s*${prefix}_(?:MINOR|VERSION_MINOR)\s+([0-9]+)\s*\)") { $matches[1].Trim() } else { $null }
+                            $cPatch = if ($content -match "(?mi)^\s*set\s*\(\s*${prefix}_(?:PATCH|BUILD|MAINTENANCE|VERSION_PATCH|VERSION_BUILD)\s+([0-9]+)\s*\)") { $matches[1].Trim() } else { $null }
+
+                            if ($cMajor -and $cMinor) {
+                                $verParts = @($cMajor, $cMinor)
+                                if ($cPatch) { $verParts += $cPatch }
+                                $extractedVersion = $verParts -join '.'
+                                Write-Host "  [版本萃取] 專案 [$projName] 依據 [qt-cmake] 前綴 [$prefix] 變數從 [$(Split-Path $file -Leaf)] 成功組合: $extractedVersion" -ForegroundColor Green
+                                break
+                            }
+                        }
+
+                        # 4. 嘗試 project(... VERSION 4.0.9 ...) 直接定義數字
                         if ($content -match '(?s)project\s*\([^)]*VERSION\s+([0-9\.]+)') {
                             $extractedVersion = $matches[1].Trim()
                             Write-Host "  [版本萃取] 專案 [$projName] 依據 [qt-cmake] project(VERSION) 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
                             break
                         }
 
-                        # 4. 嘗試單行 set(PROJECT_VERSION "4.0.9") 或 set(APP_VERSION "4.0.9")
+                        # 5. 嘗試單行 set(PROJECT_VERSION "4.0.9") 或 set(APP_VERSION "4.0.9")
                         if ($content -match '(?mi)^\s*set\s*\(\s*(?:PROJECT_VERSION|APP_VERSION|VERSION)\s+["'']?([0-9\.]+)["'']?\s*\)') {
                             $extractedVersion = $matches[1].Trim()
                             Write-Host "  [版本萃取] 專案 [$projName] 依據 [qt-cmake] set(VERSION) 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
@@ -409,10 +425,14 @@ function Resolve-ProjectVersion {
                         $cleanP = $p.Replace('/', '\').TrimStart('\')
                         if ($cleanP -like "*.pbxproj" -or $cleanP -like "*.plist" -or $cleanP -like "*.xcconfig" -or $cleanP -like "*.podspec") {
                             $rawCandidates += (Join-Path $ProjectRoot $cleanP)
+                        } elseif ($cleanP -like "*.xcodeproj") {
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\project.pbxproj")
                         } else {
                             $rawCandidates += (Join-Path $ProjectRoot "$cleanP\*.xcodeproj\project.pbxproj")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\*\*.xcodeproj\project.pbxproj")
                             $rawCandidates += (Join-Path $ProjectRoot "$cleanP\project.pbxproj")
                             $rawCandidates += (Join-Path $ProjectRoot "$cleanP\Info.plist")
+                            $rawCandidates += (Join-Path $ProjectRoot "$cleanP\*\Info.plist")
                             $rawCandidates += (Join-Path $ProjectRoot "$cleanP\*.xcconfig")
                             $rawCandidates += (Join-Path $ProjectRoot "$cleanP\*.podspec")
                         }
@@ -421,7 +441,9 @@ function Resolve-ProjectVersion {
                 # B. 檢查專案根目錄
                 $rawCandidates += @(
                     (Join-Path $ProjectRoot "*.xcodeproj\project.pbxproj"),
+                    (Join-Path $ProjectRoot "*\*.xcodeproj\project.pbxproj"),
                     (Join-Path $ProjectRoot "Info.plist"),
+                    (Join-Path $ProjectRoot "*\Info.plist"),
                     (Join-Path $ProjectRoot "*.xcconfig"),
                     (Join-Path $ProjectRoot "*.podspec")
                 )
@@ -444,21 +466,35 @@ function Resolve-ProjectVersion {
                     Write-Host "  [版本探測] 找到檔案: $file" -ForegroundColor DarkGray
                     $content = Get-Content -Path $file -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
                     if (-not [string]::IsNullOrWhiteSpace($content)) {
-                        # 1. 嘗試 project.pbxproj 或 .xcconfig 中的 MARKETING_VERSION
-                        if ($content -match '(?m)^\s*MARKETING_VERSION\s*=\s*([0-9\.]+)\s*;?') {
+                        # 1. 嘗試 project.pbxproj 或 .xcconfig 中的 MARKETING_VERSION (優先)
+                        if ($content -match '(?m)^\s*MARKETING_VERSION\s*=\s*["'']?([0-9\.]+)["'']?\s*;?') {
                             $extractedVersion = $matches[1].Trim()
                             Write-Host "  [版本萃取] 專案 [$projName] 依據 [ios] MARKETING_VERSION 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
                             break
                         }
 
-                        # 2. 嘗試 Info.plist 中的 CFBundleShortVersionString
-                        if ($content -match '(?s)<key>CFBundleShortVersionString</key>\s*<string>([0-9\.]+)</string>') {
+                        # 2. 嘗試 project.pbxproj 中的 CURRENT_PROJECT_VERSION (退回)
+                        if ($content -match '(?m)^\s*CURRENT_PROJECT_VERSION\s*=\s*["'']?([0-9\.]+)["'']?\s*;?') {
                             $extractedVersion = $matches[1].Trim()
-                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [ios] Info.plist 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [ios] CURRENT_PROJECT_VERSION 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
                             break
                         }
 
-                        # 3. 嘗試 CocoaPods podspec 中的 s.version
+                        # 3. 嘗試 Info.plist 中的 CFBundleShortVersionString
+                        if ($content -match '(?s)<key>CFBundleShortVersionString</key>\s*<string>([0-9\.]+)</string>') {
+                            $extractedVersion = $matches[1].Trim()
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [ios] Info.plist CFBundleShortVersionString 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+
+                        # 4. 嘗試 Info.plist 中的 CFBundleVersion (退回)
+                        if ($content -match '(?s)<key>CFBundleVersion</key>\s*<string>([0-9\.]+)</string>') {
+                            $extractedVersion = $matches[1].Trim()
+                            Write-Host "  [版本萃取] 專案 [$projName] 依據 [ios] Info.plist CFBundleVersion 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green
+                            break
+                        }
+
+                        # 5. 嘗試 CocoaPods podspec 中的 s.version
                         if ($content -match '(?m)^\s*(?:s|spec)\.version\s*=\s*["'']([0-9\.]+)["'']') {
                             $extractedVersion = $matches[1].Trim()
                             Write-Host "  [版本萃取] 專案 [$projName] 依據 [ios] podspec 從 [$(Split-Path $file -Leaf)] 成功解析: $extractedVersion" -ForegroundColor Green

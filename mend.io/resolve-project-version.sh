@@ -255,13 +255,27 @@ try:
         print('.'.join(parts))
         exit(0)
 
-    # 3. project(... VERSION 4.0.9 ...)
+    # 3. set(<PREFIX>_MAJOR ...) + set(<PREFIX>_MINOR ...) + set(<PREFIX>_PATCH ...)
+    major_match = re.search(r'set\s*\(\s*([A-Za-z0-9_]+)_(?:MAJOR|VERSION_MAJOR)\s+([0-9]+)\s*\)', c, re.IGNORECASE)
+    if major_match:
+        prefix = major_match.group(1)
+        c_maj = major_match.group(2)
+        c_min_match = re.search(r'set\s*\(\s*' + prefix + r'_(?:MINOR|VERSION_MINOR)\s+([0-9]+)\s*\)', c, re.IGNORECASE)
+        c_patch_match = re.search(r'set\s*\(\s*' + prefix + r'_(?:PATCH|BUILD|MAINTENANCE|VERSION_PATCH|VERSION_BUILD)\s+([0-9]+)\s*\)', c, re.IGNORECASE)
+        if c_min_match:
+            parts = [c_maj, c_min_match.group(1)]
+            if c_patch_match:
+                parts.append(c_patch_match.group(1))
+            print('.'.join(parts))
+            exit(0)
+
+    # 4. project(... VERSION 4.0.9 ...)
     pm = re.search(r'project\s*\([^)]*VERSION\s+([0-9\.]+)', c, re.DOTALL | re.IGNORECASE)
     if pm:
         print(pm.group(1).strip())
         exit(0)
 
-    # 4. set(PROJECT_VERSION ...)
+    # 5. set(PROJECT_VERSION ...)
     sm = re.search(r'set\s*\(\s*(?:PROJECT_VERSION|APP_VERSION|VERSION)\s+[\"|\']?([0-9\.]+)[\"|\']?\s*\)', c, re.IGNORECASE)
     if sm:
         print(sm.group(1).strip())
@@ -356,16 +370,22 @@ except Exception:
                 for p in "${paths[@]}"; do
                     if [[ "$p" == *.pbxproj || "$p" == *.plist || "$p" == *.xcconfig || "$p" == *.podspec ]]; then
                         candidates+=("${project_root}/${p}")
+                    elif [[ "$p" == *.xcodeproj ]]; then
+                        candidates+=("${project_root}/${p}/project.pbxproj")
                     else
                         candidates+=("${project_root}/${p}/*.xcodeproj/project.pbxproj")
+                        candidates+=("${project_root}/${p}/*/*.xcodeproj/project.pbxproj")
                         candidates+=("${project_root}/${p}/project.pbxproj")
                         candidates+=("${project_root}/${p}/Info.plist")
+                        candidates+=("${project_root}/${p}/*/Info.plist")
                         candidates+=("${project_root}/${p}/*.xcconfig")
                         candidates+=("${project_root}/${p}/*.podspec")
                     fi
                 done
                 candidates+=("${project_root}/*.xcodeproj/project.pbxproj")
+                candidates+=("${project_root}/*/*.xcodeproj/project.pbxproj")
                 candidates+=("${project_root}/Info.plist")
+                candidates+=("${project_root}/*/Info.plist")
                 candidates+=("${project_root}/*.xcconfig")
                 candidates+=("${project_root}/*.podspec")
             fi
@@ -392,19 +412,31 @@ try:
     with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as f:
         c = f.read()
 
-    # 1. project.pbxproj 或 .xcconfig 中的 MARKETING_VERSION
-    m = re.search(r'MARKETING_VERSION\s*=\s*([0-9\.]+)\s*;?', c)
+    # 1. project.pbxproj 或 .xcconfig 中的 MARKETING_VERSION (優先)
+    m = re.search(r'MARKETING_VERSION\s*=\s*[\"|\']?([0-9\.]+)[\"|\']?\s*;?', c)
     if m:
         print(m.group(1).strip())
         exit(0)
 
-    # 2. Info.plist 中的 CFBundleShortVersionString
+    # 2. project.pbxproj 中的 CURRENT_PROJECT_VERSION (退回)
+    m = re.search(r'CURRENT_PROJECT_VERSION\s*=\s*[\"|\']?([0-9\.]+)[\"|\']?\s*;?', c)
+    if m:
+        print(m.group(1).strip())
+        exit(0)
+
+    # 3. Info.plist 中的 CFBundleShortVersionString
     m = re.search(r'<key>CFBundleShortVersionString</key>\s*<string>([0-9\.]+)</string>', c)
     if m:
         print(m.group(1).strip())
         exit(0)
 
-    # 3. CocoaPods podspec 中的 s.version
+    # 4. Info.plist 中的 CFBundleVersion (退回)
+    m = re.search(r'<key>CFBundleVersion</key>\s*<string>([0-9\.]+)</string>', c)
+    if m:
+        print(m.group(1).strip())
+        exit(0)
+
+    # 5. CocoaPods podspec 中的 s.version
     m = re.search(r'(?:s|spec)\.version\s*=\s*[\"|\']([0-9\.]+)[\"|\']', c)
     if m:
         print(m.group(1).strip())
