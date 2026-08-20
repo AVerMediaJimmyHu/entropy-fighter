@@ -104,6 +104,7 @@ BuildAgent_Workspace/
 | `projects[].versionRule` | String | 否 | 版本萃取規則（詳見第 4 節）。未指定則使用全域 `VersionTag`。 |
 | `projects[].versionFile` | String | 否 | 自訂版本檔案相對路徑（用於精確覆蓋預設搜尋目錄）。 |
 | `projects[].paths` | Array (String) | **是** | 該專案需納入掃描的目錄或檔案清單（相對於專案根目錄）。支援：<br>1. **子目錄**：自動建立 NTFS Junction / POSIX Symlink 虛擬鏡像。<br>2. **單一檔案**：自動建立 NTFS HardLink / Symlink。<br>3. **萬用字元 (`*` / `?`)**：支援模式匹配（如 `"configs/*.json"`, `"plugins/*"`）。 |
+| `projects[].mendArgs` | Object | 否 | **專案級 Mend 掃描器參數動態注入字典**：<br>• `excludes` (字串或陣列)：**智慧增量排除**。自動保留 `wss-unified-agent.config` 基礎排除規則，並將專案自訂排除條件追加合併。<br>• **其他任意鍵值** (如 `gradle.additionalArguments`, `npm.includeDevDependencies`)：自動轉換為 `-<Key> "<Value>"` 傳遞給 Java Agent，實現 100% 零全域污染與高擴充性。 |
 
 ---
 
@@ -169,6 +170,18 @@ $$\text{1. JSON projects[].version 手動指定} \;\longrightarrow\; \text{2. ve
       "platform": "ios",
       "versionRule": "ios",
       "paths": ["LiveStreamer.xcodeproj", "LiveStreamer/Sources"]
+    },
+    {
+      "name": "LiveStreamerAndroid",
+      "platform": "android",
+      "versionRule": "android",
+      "paths": ["LiveStreamerLink", "ext/communication"],
+      "mendArgs": {
+        "excludes": [
+          "**/ext/**/build.gradle.kts"
+        ],
+        "gradle.additionalArguments": "-Pgst.dir=dummy"
+      }
     },
     {
       "name": "StreamingCenterPLUG",
@@ -408,4 +421,18 @@ $versionTag = "$($env:BUILD_NUMBER)-$($env:GIT_COMMIT.Substring(0,7))"
 
 ### Q5: 中途被中斷 (Abort)，Junction 是否會殘留？
 * 腳本主要邏輯包覆於 `try-catch-finally`，每次執行結束或拋出例外時均會強制清空 `Scan\SourceCode`。
+
+### Q6: Android 掃描報告出現簽名/建置工具鏈 Jar（如 `bcpkix-jdk18on`）或非 APK 依賴？
+* **原因**：Mend 的 `gradle.resolveDependencies=true` 預設會遍歷專案所有 Gradle Configurations（包含 Android Gradle Plugin 插件本身、簽章工具 `androidApkSigner`、Lint、UnitTest 與 BuildScript）。
+* **建議處置 1（Configuration 排除正則）**：
+  在 `mendArgs` 注入 `gradle.ignoredConfigurations` 排除非 Runtime 配置：
+  ```json
+  "gradle.ignoredConfigurations": "^.*[Tt]est.*$|^.*[Ll]int.*$|^.*[Aa]nnotationProcessor.*$|^.*[Cc]lasspath.*$|^.*[Kk]apt.*$|^.*[Ss]ign.*$|^.*[Cc]ompileOnly.*$"
+  ```
+* **建議處置 2（特定依賴樹節點精確剔除）**：
+  若特定工具鏈套件依然在依賴樹中回報，可在 `mendArgs` 宣告 `excludeDependenciesFromNodes` 直接封殺該 Package 及其所有子依賴：
+  ```json
+  "excludeDependenciesFromNodes": ".*bouncycastle.*,.*bcpkix.*,.*bcprov.*,.*bcpg.*"
+  ```
+* **優點**：由專案級 `mendArgs` 獨立控制，既不污染全域工具包，又能保留各 Flavor 的 Runtime 依賴庫存。
 * 即使手動強制終止進程造成殘留，下次啟動時也會在專案開始前自動清空該目錄，不造成重複掛載衝突。

@@ -420,6 +420,12 @@ foreach ($proj in $config.projects) {
             Write-Host "`n  [DryRun 成果] 專案基礎名稱 : $ProjectBaseName" -ForegroundColor Cyan
             Write-Host "  [DryRun 成果] 萃取版本號   : $projVersion" -ForegroundColor Cyan
             Write-Host "  [DryRun 成果] 最終 Mend 標籤: $ProjectFullName" -ForegroundColor Green
+            if ($proj.mendArgs) {
+                Write-Host "  [DryRun 成果] 偵測到專案級 mendArgs 設定:" -ForegroundColor Cyan
+                $proj.mendArgs.PSObject.Properties | ForEach-Object {
+                    Write-Host "    - $($_.Name): $($_.Value)" -ForegroundColor DarkCyan
+                }
+            }
             Write-Host "  [DryRun] 跳過 Java 離線掃描與上傳作業。" -ForegroundColor Cyan
             continue
         }
@@ -427,13 +433,68 @@ foreach ($proj in $config.projects) {
         # G. 執行 Mend 離線掃描 (切換工作目錄至 Scan，保證產物精確落在 Scan\whitesource)
         Write-Host "  [掃描中] 啟動 Mend Unified Agent Offline Scan..." -ForegroundColor Yellow
         Push-Location $ScanDir
+        $runtimeConfigFile = $null
         try {
+            $effectiveScanConfig = $ScanConfig
+
+            # 動態生成專案級 Runtime Config (支援增量 excludes 與 Properties 原生覆蓋，100% 規避 CLI 跳脫問題)
+            if ($proj.mendArgs -and (Test-Path $ScanConfig)) {
+                $configDir = Split-Path $ScanConfig -Parent
+                $runtimeConfigFile = Join-Path $configDir "wss-runtime-$([System.Guid]::NewGuid().ToString('N').Substring(0,8)).config"
+                
+                $configLines = [System.Collections.Generic.List[string]](Get-Content $ScanConfig -Encoding UTF8)
+                
+                $baseExcludes = ""
+                $origExcludesIdx = -1
+                for ($lineIdx = 0; $lineIdx -lt $configLines.Count; $lineIdx++) {
+                    if ($configLines[$lineIdx] -match '^\s*excludes\s*=\s*(.*)$') {
+                        $baseExcludes = $matches[1].Trim()
+                        $origExcludesIdx = $lineIdx
+                        break
+                    }
+                }
+
+                $mendArgsProps = $proj.mendArgs
+                $propNames = if ($mendArgsProps -is [PSCustomObject]) { $mendArgsProps.PSObject.Properties.Name } else { $mendArgsProps.Keys }
+                
+                $customLines = [System.Collections.Generic.List[string]]::new()
+                $customLines.Add("`n# ===============================================================")
+                $customLines.Add("# Project Dynamic Injected Configurations (mendArgs)")
+                $customLines.Add("# ===============================================================")
+
+                foreach ($propKey in $propNames) {
+                    $rawVal = if ($mendArgsProps -is [PSCustomObject]) { $mendArgsProps.$propKey } else { $mendArgsProps[$propKey] }
+                    if ($null -eq $rawVal) { continue }
+
+                    if ($propKey -ieq "excludes") {
+                        $customExclStr = if ($rawVal -is [System.Collections.IEnumerable] -and $rawVal -isnot [string]) { ($rawVal -join ' ') } else { [string]$rawVal }
+                        $customExclStr = $customExclStr.Trim()
+                        $effectiveExcludes = if ($baseExcludes) { "$baseExcludes $customExclStr" } else { $customExclStr }
+                        if ($origExcludesIdx -ge 0) {
+                            $configLines[$origExcludesIdx] = "excludes=$effectiveExcludes"
+                        } else {
+                            $customLines.Add("excludes=$effectiveExcludes")
+                        }
+                        Write-Host "  [mendArgs 注入] 增量排除清單 (excludes): $effectiveExcludes" -ForegroundColor Cyan
+                    } else {
+                        $strVal = [string]$rawVal
+                        $customLines.Add("$propKey=$strVal")
+                        Write-Host "  [mendArgs 注入] 寫入設定檔 $propKey=$strVal" -ForegroundColor Cyan
+                    }
+                }
+
+                $configLines.AddRange($customLines)
+                [System.IO.File]::WriteAllLines($runtimeConfigFile, $configLines, [System.Text.Encoding]::UTF8)
+                $effectiveScanConfig = $runtimeConfigFile
+                Write-Host "  [mendArgs 產生] 已生成專案專屬 Runtime Config: $runtimeConfigFile" -ForegroundColor Cyan
+            }
+
             $scanArgs = @(
                 "-Dfile.encoding=UTF-8",
                 "-jar", $AgentJarItem.FullName
             )
-            if (Test-Path $ScanConfig) {
-                $scanArgs += @("-c", $ScanConfig)
+            if (Test-Path $effectiveScanConfig) {
+                $scanArgs += @("-c", $effectiveScanConfig)
             }
             $scanArgs += @(
                 "-apiKey", $ApiKey,
@@ -444,11 +505,15 @@ foreach ($proj in $config.projects) {
                 "-d", $SourceCodeDir
             )
 
+            Write-Host "  [掃描啟動] 載入 Config: $effectiveScanConfig | 目標目錄: $SourceCodeDir" -ForegroundColor DarkCyan
             & $JavaExe @scanArgs
             if ($LASTEXITCODE -ne 0) {
                 throw "Mend 離線掃描失敗，回傳碼 ExitCode: $LASTEXITCODE"
             }
         } finally {
+            if ($runtimeConfigFile -and (Test-Path $runtimeConfigFile)) {
+                Remove-Item -Path $runtimeConfigFile -Force -ErrorAction SilentlyContinue
+            }
             Pop-Location
         }
 

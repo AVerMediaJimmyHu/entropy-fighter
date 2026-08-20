@@ -199,6 +199,27 @@ except Exception:
 " "$CONFIG_FILE_ABS" "$index"
 }
 
+# 安全讀取專案 mendArgs 字典函式
+get_proj_mend_args() {
+    local index="$1"
+    python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as f:
+        d = json.load(f)
+        p = d['projects'][int(sys.argv[2])]
+        mend_args = p.get('mendArgs', {})
+        if isinstance(mend_args, dict):
+            for k, v in mend_args.items():
+                if isinstance(v, list):
+                    print(f'{k}=' + ' '.join(str(x) for x in v))
+                else:
+                    print(f'{k}={v}')
+except Exception:
+    pass
+" "$CONFIG_FILE_ABS" "$index"
+}
+
 # 判斷是否為 Gradle 專案
 test_is_gradle_project() {
     local proj_root="$1"
@@ -582,6 +603,9 @@ for ((i=0; i<PROJECT_COUNT; i++)); do
     # F. DryRun 模式
     if [[ "$DRY_RUN" = true ]]; then
         echo -e "${GREEN}  [DryRun] 目錄組裝完成 (共 $MOUNTED_COUNT 項)，略過離線掃描與上傳。${NC}"
+        while IFS='=' read -r mkey mval; do
+            [[ -n "$mkey" ]] && echo -e "  [DryRun 成果] 偵測到專案級 mendArgs: -${mkey} \"${mval}\""
+        done < <(get_proj_mend_args "$i")
         ((SUCCESS_COUNT++))
         export PATH="$CURRENT_ENV_PATH"
         continue
@@ -593,19 +617,76 @@ for ((i=0; i<PROJECT_COUNT; i++)); do
         read -p "  按 [Enter] 鍵繼續執行離線掃描..."
     fi
 
+    # 動態生成專案級 Runtime Config (支援增量 excludes 與 Properties 原生覆蓋，100% 規避 CLI 跳脫問題)
+    EFFECTIVE_SCAN_CONFIG="$SCAN_CONFIG"
+    RUNTIME_CONFIG_FILE=""
+
+    MEND_ARGS_RAW=$(get_proj_mend_args "$i")
+    if [[ -n "$MEND_ARGS_RAW" && -f "$SCAN_CONFIG" ]]; then
+        RUNTIME_CONFIG_FILE="${SCAN_DIR}/Config/wss-runtime-${i}-$$.config"
+        cp -f "$SCAN_CONFIG" "$RUNTIME_CONFIG_FILE"
+
+        BASE_EXCLUDES=$(grep -E '^\s*excludes\s*=' "$SCAN_CONFIG" | head -n 1 | sed -E 's/^\s*excludes\s*=\s*//' | tr -d '\r' || true)
+
+        echo "" >> "$RUNTIME_CONFIG_FILE"
+        echo "# ===============================================================" >> "$RUNTIME_CONFIG_FILE"
+        echo "# Project Dynamic Injected Configurations (mendArgs)" >> "$RUNTIME_CONFIG_FILE"
+        echo "# ===============================================================" >> "$RUNTIME_CONFIG_FILE"
+
+        while IFS='=' read -r mkey mval; do
+            [[ -z "$mkey" ]] && continue
+            local_key_l=$(echo "$mkey" | tr '[:upper:]' '[:lower:]')
+            if [[ "$local_key_l" == "excludes" ]]; then
+                effective_excl="$mval"
+                if [[ -n "$BASE_EXCLUDES" ]]; then
+                    effective_excl="${BASE_EXCLUDES} ${mval}"
+                fi
+                # 替換或追加 excludes
+                if grep -q -E '^\s*excludes\s*=' "$RUNTIME_CONFIG_FILE"; then
+                    # 避免 sed 遇到特殊字元報錯，直接透過 python 乾淨替換或追加
+                    python3 -c "
+import sys
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    lines = f.readlines()
+with open(sys.argv[1], 'w', encoding='utf-8') as f:
+    for line in lines:
+        if line.strip().startswith('excludes='):
+            f.write(f'excludes={sys.argv[2]}\n')
+        else:
+            f.write(line)
+" "$RUNTIME_CONFIG_FILE" "$effective_excl"
+                else
+                    echo "excludes=${effective_excl}" >> "$RUNTIME_CONFIG_FILE"
+                fi
+                echo -e "  [mendArgs 注入] 增量排除清單 (excludes): $effective_excl"
+            else
+                echo "${mkey}=${mval}" >> "$RUNTIME_CONFIG_FILE"
+                echo -e "  [mendArgs 注入] 寫入設定檔 ${mkey}=${mval}"
+            fi
+        done < <(get_proj_mend_args "$i")
+
+        EFFECTIVE_SCAN_CONFIG="$RUNTIME_CONFIG_FILE"
+        echo -e "  [mendArgs 產生] 已生成專案專屬 Runtime Config: $RUNTIME_CONFIG_FILE"
+    fi
+
     # H. 執行 Java 離線掃描 (Offline Scan)
-    echo -e "  [掃描開始] 呼叫 Unified Agent 執行離線掃描..."
+    echo -e "  [掃描開始] 呼叫 Unified Agent 執行離線掃描 (載入 Config: $EFFECTIVE_SCAN_CONFIG)..."
     (
         cd "$SCAN_DIR"
         "$JAVA_BIN" -Dfile.encoding=UTF-8 \
             -jar "$UA_JAR" \
-            -c "$SCAN_CONFIG" \
+            -c "$EFFECTIVE_SCAN_CONFIG" \
             -d "SourceCode" \
             -apiKey "$RESOLVED_API_KEY" \
             -userKey "$RESOLVED_USER_KEY" \
             -product "$JSON_PRODUCT" \
             -project "$PROJ_FULL_NAME"
     )
+
+    # 清理暫存 runtime config
+    if [[ -n "$RUNTIME_CONFIG_FILE" && -f "$RUNTIME_CONFIG_FILE" ]]; then
+        rm -f "$RUNTIME_CONFIG_FILE" 2>/dev/null || true
+    fi
 
     export PATH="$CURRENT_ENV_PATH"
 
