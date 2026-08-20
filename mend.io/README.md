@@ -213,7 +213,8 @@ $$\text{1. JSON projects[].version 手動指定} \;\longrightarrow\; \text{2. ve
 | `-MendDir` | String | 否 | `.\Mend_Windows_scan-OfflineScan` | Mend 工具包根目錄。 |
 | `-ApiKey` | String | 否 | `$env:MEND_API_KEY` | Mend 組織 API Key。 |
 | `-UserKey` | String | 否 | `$env:MEND_USER_KEY` | Mend 使用者 Key。 |
-| `-DryRun` | Switch | 否 | `$false` | 僅組裝 Junction 並輸出鏡像目錄檢視表與版本萃取結果，**不執行 Java 離線掃描與上傳**。 |
+| `-ScanOnly` | Switch | 否 | `$false` | 僅執行目錄組裝與 Java 離線掃描（產出 `update-request.txt`），**略過上傳作業**。<br>（別名：`-SkipUpload` / macOS: `--scan-only`, `--skip-upload`） |
+| `-DryRun` | Switch | 否 | `$false` | 僅組裝 Junction 並輸出鏡像目錄檢視表與版本萃取結果，**不執行 Java 離線掃描與上傳**（優先權高於 `-ScanOnly`）。 |
 | `-PauseBeforeScan` | Switch | 否 | `$false` | 組裝完成後中斷暫停，供工程師以檔案總管手動驗證目錄內容。 |
 
 ---
@@ -230,7 +231,16 @@ $$\text{1. JSON projects[].version 手動指定} \;\longrightarrow\; \text{2. ve
     -DryRun
 ```
 
-#### 2. 人工檢視目錄內容 (Debug 暫停模式)
+#### 2. 僅執行離線掃描不上傳 (Scan-Only 模式)
+適合產出 `update-request.txt` 供離線審查或驗證弱點偵測結果：
+
+```powershell
+.\Invoke-MendBatchScan.ps1 `
+    -ConfigFile ".\mend-config.json" `
+    -ScanOnly
+```
+
+#### 3. 人工檢視目錄內容 (Debug 暫停模式)
 組裝完後腳本會暫停並提示路徑，確認無誤後於終端機按下 `Enter` 繼續：
 
 ```powershell
@@ -242,7 +252,7 @@ $$\text{1. JSON projects[].version 手動指定} \;\longrightarrow\; \text{2. ve
     -PauseBeforeScan
 ```
 
-#### 3. 正式全流程執行 (透過環境變數傳遞憑證)
+#### 4. 正式全流程執行 (透過環境變數傳遞憑證)
 
 ```powershell
 $env:MEND_API_KEY = "your-organization-api-key"

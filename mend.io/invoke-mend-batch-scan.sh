@@ -8,7 +8,7 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 
 # 預設參數
 CONFIG_FILE=""
@@ -19,6 +19,7 @@ API_KEY="${MEND_API_KEY:-}"
 USER_KEY="${MEND_USER_KEY:-}"
 DRY_RUN=false
 PAUSE_BEFORE_SCAN=false
+SCAN_ONLY=false
 
 # 顏色定義
 RED='\033[0;31m'
@@ -41,6 +42,7 @@ Options:
   -m, --mend-dir <path>         Mend offline toolpack directory (Default: ./Mend_Mac_scan-OfflineScan)
   -a, --api-key <key>           Mend Organization API Key (Fallback: \$MEND_API_KEY)
   -u, --user-key <key>          Mend User Key (Fallback: \$MEND_USER_KEY)
+  -s, --scan-only               Perform Java offline scan only; skip upload (Alias: --skip-upload)
   -d, --dry-run                 Assemble symlinks and report only; skip Java scan & upload
   -p, --pause                   Pause before scanning to manually inspect staging folder
   -h, --help                    Show this help message
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         -m|--mend-dir)       MEND_DIR="$2"; shift 2 ;;
         -a|--api-key)        API_KEY="$2"; shift 2 ;;
         -u|--user-key)       USER_KEY="$2"; shift 2 ;;
+        -s|--scan-only|--skip-upload) SCAN_ONLY=true; shift ;;
         -d|--dry-run)        DRY_RUN=true; shift ;;
         -p|--pause)          PAUSE_BEFORE_SCAN=true; shift ;;
         -h|--help)           usage ;;
@@ -78,9 +81,7 @@ else
     exit 1
 fi
 
-echo -e "\n${CYAN}========================================================================${NC}"
-echo -e "${BOLD}${CYAN} Mend.io Offline Batch Scan & Upload Runner for macOS (v${SCRIPT_VERSION})${NC}"
-echo -e "${CYAN}========================================================================${NC}\n"
+echo -e "\n${CYAN}[Mend Runner] macOS Batch Scan${NC}"
 
 # 1. 驗證設定檔路徑
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -256,7 +257,6 @@ FAIL_COUNT=0
 for ((i=0; i<PROJECT_COUNT; i++)); do
     PROJ_NAME="$(get_proj_field "$i" 'name')"
     PROJ_PLATFORM="$(get_proj_field "$i" 'platform')"
-    [[ -z "$PROJ_PLATFORM" ]] && PROJ_PLATFORM="all"
     PROJ_VER="$(get_proj_field "$i" 'version')"
     PROJ_RULE="$(get_proj_field "$i" 'versionRule')"
     PROJ_FLAVOR="$(get_proj_field "$i" 'flavor')"
@@ -266,10 +266,9 @@ for ((i=0; i<PROJECT_COUNT; i++)); do
     echo -e "${BOLD}${MAGENTA}>> 處理專案 [$((i+1))/$PROJECT_COUNT]: $PROJ_NAME${NC}"
     echo -e "${MAGENTA}------------------------------------------------------------------------${NC}"
 
-    # A. 平台過濾 (macOS 執行環境下自動略過 windows 專案，相容 Bash 3.2)
     # A. 平台過濾 (macOS 執行環境下自動略過 windows 專案，相容 ios/macos/all)
-    local_plat=$(echo "$PROJ_PLATFORM" | tr '[:upper:]' '[:lower:]')
-    if [[ "$local_plat" == "windows" || "$local_plat" == "win" || "$local_plat" == "win32" || "$local_plat" == "win64" ]]; then
+    plat_lower=$(echo "${PROJ_PLATFORM:-all}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$plat_lower" == "windows" || "$plat_lower" == "win" || "$plat_lower" == "win32" || "$plat_lower" == "win64" ]]; then
         echo -e "${YELLOW}  [平台略過] 專案 [$PROJ_NAME] 指定平台為 [$PROJ_PLATFORM]，在 macOS 環境下自動略過。${NC}"
         ((SKIP_COUNT++))
         continue
@@ -292,9 +291,9 @@ for ((i=0; i<PROJECT_COUNT; i++)); do
         "$VERSION_TAG" \
         "${current_paths[@]}")
 
-    # C. 組合 Mend Project 完整名稱
+    # C. 組合 Mend Project 完整名稱 (僅在明確指定非 all/any 的 platform 時才嵌入前綴)
     PROJ_FULL_NAME="$PROJ_NAME"
-    if [[ -n "$PROJ_PLATFORM" && "$local_plat" != "all" ]]; then
+    if [[ -n "$PROJ_PLATFORM" && "$plat_lower" != "all" && "$plat_lower" != "any" ]]; then
         PROJ_FULL_NAME="${PROJ_NAME}-${PROJ_PLATFORM}-${PROJ_RESOLVED_VER}"
     else
         PROJ_FULL_NAME="${PROJ_NAME}-${PROJ_RESOLVED_VER}"
@@ -383,19 +382,36 @@ for ((i=0; i<PROJECT_COUNT; i++)); do
     fi
     echo -e "${GREEN}  [掃描成功] 產出離線記錄檔: $SCAN_UPDATE_FILE${NC}"
 
+    # 若開啟 ScanOnly (或 SkipUpload)，產出記錄檔後略過上傳作業
+    if [[ "$SCAN_ONLY" = true ]]; then
+        echo -e "${CYAN}  [ScanOnly] 離線掃描完成，略過上傳步驟: $SCAN_UPDATE_FILE${NC}"
+        echo -e "${GREEN}  [專案成功] 專案 [$PROJ_FULL_NAME] 離線掃描完成 (ScanOnly)。${NC}"
+        ((SUCCESS_COUNT++))
+        continue
+    fi
+
     # H. 準備上傳
     UPLOAD_REQ_FILE="${UPLOAD_DIR}/UploadFile/update-request.txt"
     mkdir -p "$(dirname "$UPLOAD_REQ_FILE")"
     cp -f "$SCAN_UPDATE_FILE" "$UPLOAD_REQ_FILE"
 
     echo -e "  [上傳開始] 呼叫 Unified Agent 上傳中繼資料至 Mend.io..."
+    upload_args=(
+        "$JAVA_BIN" -Dfile.encoding=UTF-8
+        -jar "$UA_JAR"
+    )
+    if [[ -n "$UPLOAD_CONFIG" && -f "$UPLOAD_CONFIG" ]]; then
+        upload_args+=(-c "$UPLOAD_CONFIG")
+    fi
+    upload_args+=(
+        -apiKey "$RESOLVED_API_KEY"
+        -userKey "$RESOLVED_USER_KEY"
+        -requestFiles "UploadFile/update-request.txt"
+    )
+
     (
         cd "$UPLOAD_DIR"
-        "$JAVA_BIN" -Dfile.encoding=UTF-8 \
-            -jar "$UA_JAR" \
-            -apiKey "$RESOLVED_API_KEY" \
-            -userKey "$RESOLVED_USER_KEY" \
-            -requestFiles "UploadFile/update-request.txt"
+        "${upload_args[@]}"
     )
     echo -e "${GREEN}  [上傳成功] 專案 [$PROJ_FULL_NAME] 上傳完成！${NC}"
     ((SUCCESS_COUNT++))

@@ -35,13 +35,15 @@ param (
     [string]$UserKey = $env:MEND_USER_KEY,
 
     [switch]$DryRun,
-    [switch]$PauseBeforeScan
+    [switch]$PauseBeforeScan,
+    [Alias("SkipUpload")]
+    [switch]$ScanOnly
 )
 
-# Script Version: 1.7.0
-# Last Updated  : 2026-08-18
+# Script Version: 1.8.0
+# Last Updated  : 2026-08-20
 
-$ScriptVersion = "1.7.0"
+$ScriptVersion = "1.8.0"
 $ErrorActionPreference = "Stop"
 
 # 載入獨立版本解析模組
@@ -272,12 +274,12 @@ $ScanConfig = Join-Path $ScanDir "Config\Scan-wss-unified-agent.config"
 $UploadConfig = Join-Path $UploadDir "Config\Upload-wss-unified-agent.config"
 $UpdateRequestFile = Join-Path $ScanDir "whitesource\update-request.txt"
 
-Write-Host "========================================================" -ForegroundColor Cyan
-Write-Host " Mend Batch Scan Runner (v$ScriptVersion)" -ForegroundColor Cyan
-Write-Host " Config File   : $($ConfigFileObj.Path)"
-Write-Host " Product Name  : $ProductName"
-Write-Host " Default Tag   : $VersionTag"
-Write-Host " Project Root  : $ResolvedProjectRoot"
+Write-Host "`n[Mend Runner] Windows Batch Scan" -ForegroundColor Cyan
+Write-Host "  設定檔路徑 : $($ConfigFileObj.Path)"
+Write-Host "  專案根目錄 : $ResolvedProjectRoot"
+Write-Host "  產品名稱   : $ProductName"
+Write-Host "  預設標籤   : $VersionTag"
+Write-Host "  Mend 工具包: $($MendDirObj.Path)"
 Write-Host " Target Staging: $SourceCodeDir"
 Write-Host " Scan Dir      : $ScanDir"
 Write-Host " Upload Dir    : $UploadDir"
@@ -450,7 +452,18 @@ foreach ($proj in $config.projects) {
             Pop-Location
         }
 
-        # H. 原生 Java 呼叫上傳 (切換至 Upload 目錄，免除 bat 與 pause 阻擋)
+        # H. 若開啟 ScanOnly (或 SkipUpload)，產出記錄檔後略過上傳作業
+        if ($ScanOnly) {
+            if (Test-Path $UpdateRequestFile) {
+                Write-Host "  [ScanOnly] 離線掃描完成，略過上傳步驟: $UpdateRequestFile" -ForegroundColor Cyan
+                Write-Host ">>> [專案成功] $ProjectFullName 離線掃描完成 (ScanOnly)。" -ForegroundColor Green
+                continue
+            } else {
+                throw "掃描完成但未在 $UpdateRequestFile 找到產物。"
+            }
+        }
+
+        # I. 原生 Java 呼叫上傳 (切換至 Upload 目錄，免除 bat 與 pause 阻擋)
         if (Test-Path $UpdateRequestFile) {
             Write-Host "  [上傳中] 呼叫 Unified Agent 上傳 $UpdateRequestFile..." -ForegroundColor Yellow
             Push-Location $UploadDir
