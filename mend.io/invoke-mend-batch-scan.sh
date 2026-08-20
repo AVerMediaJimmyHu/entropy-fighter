@@ -199,6 +199,214 @@ except Exception:
 " "$CONFIG_FILE_ABS" "$index"
 }
 
+# 判斷是否為 Gradle 專案
+test_is_gradle_project() {
+    local proj_root="$1"
+    shift
+    local target_paths=("$@")
+
+    if [[ -f "${proj_root}/build.gradle" || -f "${proj_root}/build.gradle.kts" || -f "${proj_root}/gradle/wrapper/gradle-wrapper.properties" ]]; then
+        return 0
+    fi
+
+    for p in "${target_paths[@]}"; do
+        local full_p="${proj_root}/${p}"
+        if [[ -f "${full_p}/build.gradle" || -f "${full_p}/build.gradle.kts" || -f "${full_p}/gradle/wrapper/gradle-wrapper.properties" || -f "${p}/build.gradle" || -f "${p}/build.gradle.kts" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# 智慧嗅探 Gradle Binary 路徑
+resolve_gradle_bin_path() {
+    local proj_root="$1"
+    shift
+    local target_paths=("$@")
+
+    # 1. 系統 PATH 已有 gradle 則不需注入
+    if command -v gradle >/dev/null 2>&1; then
+        echo "  [Gradle 探測] 系統 PATH 已包含 gradle: $(command -v gradle)" >&2
+        echo ""
+        return 0
+    fi
+
+    echo "  [Gradle 探測] 偵測到 Gradle 依賴特徵，系統 PATH 未設定 gradle，啟動自動嗅探..." >&2
+
+    # 2. 尋找 gradle-wrapper.properties
+    local wrapper_candidates=(
+        "${proj_root}/gradle/wrapper/gradle-wrapper.properties"
+    )
+    for p in "${target_paths[@]}"; do
+        wrapper_candidates+=("${proj_root}/${p}/gradle/wrapper/gradle-wrapper.properties")
+        wrapper_candidates+=("${proj_root}/${p}/wrapper/gradle-wrapper.properties")
+        wrapper_candidates+=("${p}/gradle/wrapper/gradle-wrapper.properties")
+    done
+
+    local target_dist_name=""
+    for cand in "${wrapper_candidates[@]}"; do
+        if [[ -f "$cand" ]]; then
+            echo "  [Gradle 探測] 讀取 Wrapper 設定: $cand" >&2
+            local zip_name
+            zip_name=$(grep -E 'distributionUrl\s*=' "$cand" | sed -E 's/.*(gradle-[0-9\.]+(-[a-zA-Z0-9]+)?(-bin|-all)?\.zip).*/\1/' || true)
+            if [[ -n "$zip_name" ]]; then
+                target_dist_name="${zip_name%.zip}"
+                echo "  [Gradle 探測] 目標版本名稱: $target_dist_name" >&2
+            fi
+            break
+        fi
+    done
+
+    # 3. 搜尋本機 Gradle 快取
+    local gradle_dists_root=""
+    if [[ -n "$GRADLE_USER_HOME" && -d "$GRADLE_USER_HOME" ]]; then
+        gradle_dists_root="${GRADLE_USER_HOME}/wrapper/dists"
+        echo "  [Gradle 探測] 依據環境變數 GRADLE_USER_HOME 搜尋快取: $gradle_dists_root" >&2
+    elif [[ -d "$HOME/.gradle/wrapper/dists" ]]; then
+        gradle_dists_root="$HOME/.gradle/wrapper/dists"
+        echo "  [Gradle 探測] 搜尋本機預設快取目錄: $gradle_dists_root" >&2
+    fi
+
+    if [[ -d "$gradle_dists_root" ]]; then
+        # A. 精確匹配目標版本
+        if [[ -n "$target_dist_name" && -d "${gradle_dists_root}/${target_dist_name}" ]]; then
+            local matched_bin
+            matched_bin=$(find "${gradle_dists_root}/${target_dist_name}" -maxdepth 4 -type f -name "gradle" 2>/dev/null | head -n 1)
+            if [[ -n "$matched_bin" && -f "$matched_bin" ]]; then
+                chmod +x "$matched_bin" 2>/dev/null || true
+                echo "  [Gradle 探測] 精確版本匹配成功: $matched_bin" >&2
+                dirname "$matched_bin"
+                return 0
+            fi
+        fi
+
+        # B. Fallback: 尋找快取中任一可用的 gradle binary
+        local fallback_bin
+        fallback_bin=$(find "$gradle_dists_root" -maxdepth 5 -type f -name "gradle" 2>/dev/null | sort -V | tail -n 1)
+        if [[ -n "$fallback_bin" && -f "$fallback_bin" ]]; then
+            chmod +x "$fallback_bin" 2>/dev/null || true
+            echo "  [Gradle 探測] (Fallback) 使用快取中最新 gradle: $fallback_bin" >&2
+            dirname "$fallback_bin"
+            return 0
+        fi
+    fi
+
+    echo "  [Gradle 探測] 未能在本機 Gradle 快取中找到 gradle 執行檔。" >&2
+    echo ""
+    return 0
+}
+
+# 智慧嗅探與解析 Swift Package Manager (SPM) 依賴套件
+resolve_spm_dependencies() {
+    local proj_name="$1"
+    local proj_plat="$2"
+    local proj_rule="$3"
+    local proj_root="$4"
+    shift 4
+    local target_paths=("$@")
+
+    local plat_l
+    plat_l=$(echo "$proj_plat" | tr '[:upper:]' '[:lower:]')
+    local rule_l
+    rule_l=$(echo "$proj_rule" | tr '[:upper:]' '[:lower:]')
+
+    # 1. 判斷是否具備 Apple / iOS / Xcode 特徵
+    local is_apple_target=false
+    if [[ "$plat_l" == "ios" || "$plat_l" == "macos" || "$plat_l" == "mac" || "$rule_l" == "ios" || "$rule_l" == "xcode" || "$rule_l" == "apple" ]]; then
+        is_apple_target=true
+    fi
+
+    # 2. 搜尋 Xcode 專案檔案 (*.xcworkspace, *.xcodeproj)
+    local xcode_candidates=()
+    for p in "${target_paths[@]}"; do
+        local full_p="${proj_root}/${p}"
+        if [[ "$p" == *.xcodeproj || "$p" == *.xcworkspace ]]; then
+            xcode_candidates+=("$full_p")
+        elif [[ -d "$full_p" ]]; then
+            while IFS= read -r xf; do
+                [[ -n "$xf" ]] && xcode_candidates+=("$xf")
+            done < <(find "$full_p" -maxdepth 3 \( -name "*.xcworkspace" -o -name "*.xcodeproj" \) 2>/dev/null || true)
+        fi
+    done
+
+    # 若 paths 沒找到，從專案根目錄搜尋
+    if [[ ${#xcode_candidates[@]} -eq 0 ]]; then
+        while IFS= read -r xf; do
+            [[ -n "$xf" ]] && xcode_candidates+=("$xf")
+        done < <(find "$proj_root" -maxdepth 4 \( -name "*.xcworkspace" -o -name "*.xcodeproj" \) 2>/dev/null || true)
+    fi
+
+    # 若非 Apple 目標且完全沒有 Xcode 專案，靜默略過
+    if [[ "$is_apple_target" = false && ${#xcode_candidates[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo "  [SPM 探測] 專案 [$proj_name] 開始搜尋 Xcode / SPM 依賴定義..." >&2
+
+    # 3. 檢查系統是否具備 xcodebuild
+    if ! command -v xcodebuild >/dev/null 2>&1; then
+        echo "  [SPM 略過] 系統未安裝 xcodebuild，略過 SPM 自動解析。" >&2
+        return 0
+    fi
+
+    # 4. 對每個 Xcode 專案嘗試解析 SPM
+    local spm_cache_dir="${proj_root}/.spm_cache"
+    mkdir -p "$spm_cache_dir"
+
+    for xtarget in "${xcode_candidates[@]}"; do
+        [[ ! -e "$xtarget" ]] && continue
+        echo "  [SPM 探測] 鎖定目標 Xcode 專案: $(basename "$xtarget")" >&2
+        local target_dir
+        target_dir="$(dirname "$xtarget")"
+        local target_base
+        target_base="$(basename "$xtarget")"
+
+        echo "  [SPM 解析] 正在透過 xcodebuild 自動拉取第三方套件原始碼 (0% 編譯)..." >&2
+        (
+            cd "$target_dir" 2>/dev/null || true
+            if [[ "$target_base" == *.xcworkspace ]]; then
+                xcodebuild -resolvePackageDependencies \
+                    -workspace "$target_base" \
+                    -clonedSourcePackagesDirPath "$spm_cache_dir" -quiet >/dev/null 2>&1 || true
+            else
+                xcodebuild -resolvePackageDependencies \
+                    -project "$target_base" \
+                    -clonedSourcePackagesDirPath "$spm_cache_dir" -quiet >/dev/null 2>&1 || true
+            fi
+        )
+        if [[ -d "${spm_cache_dir}/checkouts" ]]; then
+            break
+        fi
+    done
+
+    # 5. 自適應探測 checkouts 目錄位置 (Xcode 可能建立在 .spm_cache/checkouts 或 .spm_cache/SourcePackages/checkouts)
+    local actual_checkouts=""
+    if [[ -d "${spm_cache_dir}/checkouts" ]]; then
+        actual_checkouts="${spm_cache_dir}/checkouts"
+    elif [[ -d "${spm_cache_dir}/SourcePackages/checkouts" ]]; then
+        actual_checkouts="${spm_cache_dir}/SourcePackages/checkouts"
+    else
+        local found_c
+        found_c=$(find "$spm_cache_dir" -maxdepth 3 -type d -name "checkouts" 2>/dev/null | head -n 1 || true)
+        if [[ -n "$found_c" && -d "$found_c" ]]; then
+            actual_checkouts="$found_c"
+        fi
+    fi
+
+    if [[ -n "$actual_checkouts" && -d "$actual_checkouts" ]]; then
+        local pkg_count
+        pkg_count=$(find "$actual_checkouts" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+        echo "  [SPM 解析] 成功拉取 SPM 套件庫原始碼 (共 $pkg_count 個套件，路徑: $actual_checkouts)" >&2
+        echo "$actual_checkouts"
+        return 0
+    else
+        echo "  [SPM 探測] 專案 [$proj_name] 未發現需拉取的 SPM 套件依賴。" >&2
+    fi
+
+    return 0
+}
+
 # 6. 解析頂層設定
 JSON_PRODUCT="$(get_config_field 'productName')"
 JSON_PROJECT_ROOT="$(get_config_field 'projectRoot')"
@@ -341,26 +549,51 @@ for ((i=0; i<PROJECT_COUNT; i++)); do
         done
     done
 
+    # 支援 Swift Package Manager (SPM) 依賴套件自動掛載
+    SPM_CHECKOUTS_DIR=$(resolve_spm_dependencies "$PROJ_NAME" "$PROJ_PLATFORM" "$PROJ_RULE" "$RESOLVED_PROJECT_ROOT" "${current_paths[@]}" | tail -n 1)
+    if [[ -n "$SPM_CHECKOUTS_DIR" && -d "$SPM_CHECKOUTS_DIR" ]]; then
+        mkdir -p "${SOURCE_CODE_DIR}/spm_packages"
+        for pkg_dir in "$SPM_CHECKOUTS_DIR"/*; do
+            if [[ -d "$pkg_dir" ]]; then
+                pkg_base="$(basename "$pkg_dir")"
+                ln -sf "$pkg_dir" "${SOURCE_CODE_DIR}/spm_packages/${pkg_base}"
+            fi
+        done
+        echo -e "${GREEN}  [SPM 掛載] 已將 SPM 依賴套件原始碼鏡像掛載至 SourceCode/spm_packages (共 $(find "$SPM_CHECKOUTS_DIR" -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ') 個套件)${NC}"
+        ((MOUNTED_COUNT++))
+    fi
+
     if [[ "$MOUNTED_COUNT" -eq 0 ]]; then
         echo -e "${RED}  [錯誤] 專案 [$PROJ_NAME] 未能成功掛載任何路徑！${NC}" >&2
         ((FAIL_COUNT++))
         continue
     fi
 
-    # E. DryRun 模式
+    # E. 專案技術棧感知：僅在 Gradle 專案時動態注入 Gradle PATH
+    CURRENT_ENV_PATH="$PATH"
+    if test_is_gradle_project "$RESOLVED_PROJECT_ROOT" "${current_paths[@]}"; then
+        DETECTED_GRADLE_BIN=$(resolve_gradle_bin_path "$RESOLVED_PROJECT_ROOT" "${current_paths[@]}")
+        if [[ -n "$DETECTED_GRADLE_BIN" && -d "$DETECTED_GRADLE_BIN" ]]; then
+            export PATH="${DETECTED_GRADLE_BIN}:${PATH}"
+            echo -e "${GREEN}  [Gradle 注入] 已動態將 Gradle bin 加入當前專案執行環境 PATH${NC}"
+        fi
+    fi
+
+    # F. DryRun 模式
     if [[ "$DRY_RUN" = true ]]; then
         echo -e "${GREEN}  [DryRun] 目錄組裝完成 (共 $MOUNTED_COUNT 項)，略過離線掃描與上傳。${NC}"
         ((SUCCESS_COUNT++))
+        export PATH="$CURRENT_ENV_PATH"
         continue
     fi
 
-    # F. 人工檢視暫停模式
+    # G. 人工檢視暫停模式
     if [[ "$PAUSE_BEFORE_SCAN" = true ]]; then
         echo -e "${YELLOW}\n  [Pause] 已暫停，請檢視暫存目錄: $SOURCE_CODE_DIR${NC}"
         read -p "  按 [Enter] 鍵繼續執行離線掃描..."
     fi
 
-    # G. 執行 Java 離線掃描 (Offline Scan)
+    # H. 執行 Java 離線掃描 (Offline Scan)
     echo -e "  [掃描開始] 呼叫 Unified Agent 執行離線掃描..."
     (
         cd "$SCAN_DIR"
@@ -373,6 +606,8 @@ for ((i=0; i<PROJECT_COUNT; i++)); do
             -product "$JSON_PRODUCT" \
             -project "$PROJ_FULL_NAME"
     )
+
+    export PATH="$CURRENT_ENV_PATH"
 
     SCAN_UPDATE_FILE="${SCAN_DIR}/whitesource/update-request.txt"
     if [[ ! -s "$SCAN_UPDATE_FILE" ]]; then
