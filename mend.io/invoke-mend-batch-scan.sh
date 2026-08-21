@@ -17,6 +17,7 @@ PROJECT_ROOT=""
 MEND_DIR="${SCRIPT_DIR}/Mend_Mac_scan-OfflineScan"
 API_KEY="${MEND_API_KEY:-}"
 USER_KEY="${MEND_USER_KEY:-}"
+LOG_DIR=""
 DRY_RUN=false
 PAUSE_BEFORE_SCAN=false
 SCAN_ONLY=false
@@ -42,6 +43,7 @@ Options:
   -m, --mend-dir <path>         Mend offline toolpack directory (Default: ./Mend_Mac_scan-OfflineScan)
   -a, --api-key <key>           Mend Organization API Key (Fallback: \$MEND_API_KEY)
   -u, --user-key <key>          Mend User Key (Fallback: \$MEND_USER_KEY)
+  -l, --log-dir <path>          Central log archive directory (Default: \$WORKSPACE/mend-logs in CI)
   -s, --scan-only               Perform Java offline scan only; skip upload (Alias: --skip-upload)
   -d, --dry-run                 Assemble symlinks and report only; skip Java scan & upload
   -p, --pause                   Pause before scanning to manually inspect staging folder
@@ -59,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         -m|--mend-dir)       MEND_DIR="$2"; shift 2 ;;
         -a|--api-key)        API_KEY="$2"; shift 2 ;;
         -u|--user-key)       USER_KEY="$2"; shift 2 ;;
+        -l|--log-dir)        LOG_DIR="$2"; shift 2 ;;
         -s|--scan-only|--skip-upload) SCAN_ONLY=true; shift ;;
         -d|--dry-run)        DRY_RUN=true; shift ;;
         -p|--pause)          PAUSE_BEFORE_SCAN=true; shift ;;
@@ -455,12 +458,25 @@ else
     fi
 fi
 
+# 決定日誌集中輸出目錄 (優先順序: 1. -l/--log-dir -> 2. $WORKSPACE/mend-logs)
+EFFECTIVE_LOG_DIR=""
+if [[ -n "$LOG_DIR" ]]; then
+    mkdir -p "$LOG_DIR"
+    EFFECTIVE_LOG_DIR="$(cd "$LOG_DIR" && pwd)"
+elif [[ -n "${WORKSPACE:-}" ]]; then
+    EFFECTIVE_LOG_DIR="${WORKSPACE}/mend-logs"
+fi
+
 echo -e "  [設定檔路徑] $CONFIG_FILE_ABS"
 echo -e "  [專案根目錄] $RESOLVED_PROJECT_ROOT"
 echo -e "  [Mend工具包] $MEND_DIR_ABS"
 echo -e "  [Java執行檔] ${JAVA_BIN:-'未找到 (DryRun 可繼續)'}"
 echo -e "  [UnifiedAgent] ${UA_JAR:-'未找到'}"
-echo -e "  [產品名稱]   $JSON_PRODUCT\n"
+echo -e "  [產品名稱]   $JSON_PRODUCT"
+if [[ -n "$EFFECTIVE_LOG_DIR" ]]; then
+    echo -e "  [日誌歸檔]   $EFFECTIVE_LOG_DIR"
+fi
+echo ""
 
 # 8. 取得 projects 數量並逐一處理
 PROJECT_COUNT=$(python3 -c "
@@ -731,6 +747,31 @@ with open(sys.argv[1], 'w', encoding='utf-8') as f:
     )
     echo -e "${GREEN}  [上傳成功] 專案 [$PROJ_FULL_NAME] 上傳完成！${NC}"
     ((SUCCESS_COUNT++))
+
+    # 集中歸檔 Mend 日誌 (Scan + Upload) 並清空工具包殘留 (防止 Build Server 磁碟爆滿)
+    for stage_info in "Scan:${SCAN_DIR}/whitesource" "Upload:${UPLOAD_DIR}/whitesource"; do
+        stage_name="${stage_info%%:*}"
+        ws_dir="${stage_info#*:}"
+        if [[ -d "$ws_dir" ]]; then
+            if [[ -n "$EFFECTIVE_LOG_DIR" && -n "$PROJ_FULL_NAME" ]]; then
+                proj_log_dest="${EFFECTIVE_LOG_DIR}/${PROJ_FULL_NAME}"
+                mkdir -p "$proj_log_dest"
+                for item in "$ws_dir"/*; do
+                    [[ ! -e "$item" ]] && continue
+                    item_base="$(basename "$item")"
+                    [[ "$item_base" == "update-request.txt" ]] && continue
+                    dest_item="${proj_log_dest}/${stage_name}_${item_base}"
+                    cp -R "$item" "$dest_item" 2>/dev/null || true
+                    rm -rf "$item" 2>/dev/null || true
+                done
+            else
+                find "$ws_dir" -mindepth 1 -maxdepth 1 -type d ! -name "update-request.txt" -exec rm -rf {} + 2>/dev/null || true
+            fi
+        fi
+    done
+    if [[ -n "$EFFECTIVE_LOG_DIR" && -n "$PROJ_FULL_NAME" ]]; then
+        echo -e "${CYAN}  [日誌歸檔] 已將 Scan/Upload 日誌加上前綴並安全移至: ${EFFECTIVE_LOG_DIR}/${PROJ_FULL_NAME}${NC}"
+    fi
 done
 
 # 清理最終暫存

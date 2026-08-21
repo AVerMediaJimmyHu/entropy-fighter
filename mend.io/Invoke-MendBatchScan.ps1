@@ -33,6 +33,7 @@ param (
     [string]$MendDir = (Join-Path $PSScriptRoot "Mend_Windows_scan-OfflineScan"),
     [string]$ApiKey = $env:MEND_API_KEY,
     [string]$UserKey = $env:MEND_USER_KEY,
+    [string]$LogDir,
 
     [switch]$DryRun,
     [switch]$PauseBeforeScan,
@@ -40,10 +41,10 @@ param (
     [switch]$ScanOnly
 )
 
-# Script Version: 1.8.0
-# Last Updated  : 2026-08-20
+# Script Version: 1.9.0
+# Last Updated  : 2026-08-21
 
-$ScriptVersion = "1.8.0"
+$ScriptVersion = "1.9.0"
 $ErrorActionPreference = "Stop"
 
 # 載入獨立版本解析模組
@@ -283,6 +284,17 @@ Write-Host "  Mend 工具包: $($MendDirObj.Path)"
 Write-Host " Target Staging: $SourceCodeDir"
 Write-Host " Scan Dir      : $ScanDir"
 Write-Host " Upload Dir    : $UploadDir"
+
+# 決定日誌集中輸出目錄 (優先順序: 1. -LogDir -> 2. $env:WORKSPACE/mend-logs)
+$EffectiveLogDir = $null
+if ($LogDir) {
+    $EffectiveLogDir = [System.IO.Path]::GetFullPath($LogDir)
+} elseif ($env:WORKSPACE) {
+    $EffectiveLogDir = Join-Path $env:WORKSPACE "mend-logs"
+}
+if ($EffectiveLogDir) {
+    Write-Host " Log Archive   : $EffectiveLogDir" -ForegroundColor Green
+}
 if ($DryRun) { Write-Host " Mode          : DRY-RUN (不執行掃描與上傳)" -ForegroundColor Magenta }
 Write-Host "========================================================" -ForegroundColor Cyan
 
@@ -566,7 +578,38 @@ foreach ($proj in $config.projects) {
         Write-Error ">>> [專案失敗] 處理 $ProjectFullName 發生異常: $_"
         exit 1
     } finally {
-        # I. 環境還原與安全清理：保證隔離與防誤刪
+        # 1. 集中歸檔 Mend 日誌 (Scan + Upload) 並清空工具包殘留 (防止 Build Server 磁碟爆滿)
+        $logStages = @(
+            @{ Name = "Scan";   Dir = (Join-Path $ScanDir "whitesource") },
+            @{ Name = "Upload"; Dir = (Join-Path $UploadDir "whitesource") }
+        )
+        foreach ($stage in $logStages) {
+            $wsDir = $stage.Dir
+            $prefix = $stage.Name
+            if (Test-Path $wsDir) {
+                if ($EffectiveLogDir -and $ProjectFullName) {
+                    $projLogDest = Join-Path $EffectiveLogDir $ProjectFullName
+                    if (-not (Test-Path $projLogDest)) {
+                        New-Item -Path $projLogDest -ItemType Directory -Force | Out-Null
+                    }
+                    Get-ChildItem -Path $wsDir -Exclude "update-request.txt" -ErrorAction SilentlyContinue | ForEach-Object {
+                        $destName = "${prefix}_$($_.Name)"
+                        $targetItemPath = Join-Path $projLogDest $destName
+                        Copy-Item -Path $_.FullName -Destination $targetItemPath -Recurse -Force -ErrorAction SilentlyContinue
+                        Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                } else {
+                    Get-ChildItem -Path $wsDir -Exclude "update-request.txt" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                        Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+        }
+        if ($EffectiveLogDir -and $ProjectFullName) {
+            Write-Host "  [日誌歸檔] 已將 Scan/Upload 日誌加上前綴並安全移至: $(Join-Path $EffectiveLogDir $ProjectFullName)" -ForegroundColor Cyan
+        }
+
+        # 2. 環境還原與安全清理：保證隔離與防誤刪
         $env:PATH = $originalPathEnv
         Remove-StagingDirectory -Path $SourceCodeDir
     }
